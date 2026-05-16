@@ -1,0 +1,701 @@
+<?xml version="1.0"?>
+<!--
+  robot.urdf.xacro
+  Waveshare UGV Rover PT (PI4B / PI5 ROS2 Kit)
+  ─────────────────────────────────────────────────────────────────────────
+  All dimensions taken directly from the official datasheet (unit: mm → m).
+  Values marked [EST] are estimated from the image where no label existed.
+
+  Coordinate frames  (ROS REP-103):
+    X → forward    Y → left    Z → up
+
+  Key geometry derivations:
+    wheel_r       = 83.74 mm / 2               = 41.87 mm
+    chassis_cog_z = ground_clearance + h/2     = 25.13 + 46.87  = 72.00 mm
+    wheel_z_bl    = wheel_r - chassis_cog_z    = 41.87 - 72.00  = -30.13 mm
+    wheel_x_bl    = chassis_l/2 - (wheel_r - side_overhang/2)
+                  = 121.59 - (41.87 - 4.61)   = 84.33 mm
+    wheel_y_bl    = total_w/2 - wheel_len/2    = 115.21 - 26.00 = 89.21 mm
+-->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="ugv_rover_pt">
+
+  <!-- ================================================================
+       0.  CONSTANTS
+       ================================================================ -->
+  <!-- pi is a built-in xacro constant; no need to redefine it -->
+
+  <!-- ── Chassis  (top-view 243.18 × 159.96, front-view h 93.74) ── -->
+  <xacro:property name="chassis_l"    value="0.24318"/>
+  <xacro:property name="chassis_w"    value="0.15996"/>
+  <xacro:property name="chassis_h"    value="0.09374"/>
+  <xacro:property name="chassis_mass" value="3.500"/>   <!-- [EST] kg -->
+
+  <!-- ── Ground geometry ─────────────────────────────────────────── -->
+  <xacro:property name="ground_clearance" value="0.02513"/>  <!-- 25.13 mm -->
+  <!-- Height of base_link (= chassis centroid) above ground -->
+  <xacro:property name="chassis_cog_z"
+                  value="${ground_clearance + chassis_h / 2.0}"/>
+
+  <!-- ── Large corner wheels  (diameter 83.74 mm from front-view) ─ -->
+  <xacro:property name="total_w"    value="0.23042"/>   <!-- 230.42 mm overall width  -->
+  <xacro:property name="total_l"    value="0.25240"/>   <!-- 252.40 mm overall length -->
+  <xacro:property name="wheel_r"    value="0.04187"/>   <!-- 83.74/2 mm               -->
+  <xacro:property name="wheel_len"  value="0.05200"/>   <!-- [EST] 52 mm axial        -->
+  <xacro:property name="wheel_mass" value="0.320"/>
+
+  <!-- Wheel joint origin in base_link frame -->
+  <xacro:property name="wheel_z_bl"
+                  value="${wheel_r - chassis_cog_z}"/>
+  <xacro:property name="wheel_x_bl"
+                  value="${chassis_l/2.0 - (wheel_r - (total_l - chassis_l)/2.0)}"/>
+  <xacro:property name="wheel_y_bl"
+                  value="${total_w/2.0 - wheel_len/2.0}"/>
+
+  <!-- ── Mid bogie wheels  (smaller passive rollers, between corners) -->
+  <xacro:property name="bogie_r"    value="0.03000"/>   <!-- [EST] 30 mm radius -->
+  <xacro:property name="bogie_len"  value="0.04500"/>   <!-- [EST] 45 mm axial  -->
+  <xacro:property name="bogie_mass" value="0.120"/>
+  <xacro:property name="bogie_z_bl" value="${bogie_r - chassis_cog_z}"/>
+  <xacro:property name="bogie_y_bl" value="${total_w/2.0 - bogie_len/2.0}"/>
+
+  <!-- ── Top deck plate ──────────────────────────────────────────── -->
+  <xacro:property name="deck_l"     value="0.22000"/>   <!-- [EST] -->
+  <xacro:property name="deck_w"     value="0.15622"/>   <!-- 156.22 mm inner plate  -->
+  <xacro:property name="deck_h"     value="0.00500"/>   <!-- [EST] 5 mm             -->
+  <xacro:property name="deck_mass"  value="0.200"/>
+
+  <!-- ── Front stereo camera bar  (126.00 mm span, front-view) ──── -->
+  <xacro:property name="fcam_l"     value="0.02500"/>   <!-- [EST] depth -->
+  <xacro:property name="fcam_w"     value="0.12600"/>   <!-- 126.00 mm   -->
+  <xacro:property name="fcam_h"     value="0.02800"/>   <!-- [EST]       -->
+  <xacro:property name="fcam_mass"  value="0.060"/>
+
+  <!-- ── Deck LiDAR ──────────────────────────────────────────────── -->
+  <xacro:property name="lidar_r"    value="0.03600"/>   <!-- [EST] -->
+  <xacro:property name="lidar_h"    value="0.04000"/>   <!-- [EST] -->
+  <xacro:property name="lidar_mass" value="0.080"/>
+
+  <!-- ── Arm lower column  (fixed section, 28.00 mm, side-view) ─── -->
+  <xacro:property name="arm_col_r"  value="0.02000"/>   <!-- [EST] -->
+  <xacro:property name="arm_col_h"  value="0.02800"/>   <!-- 28.00 mm -->
+  <xacro:property name="arm_col_m"  value="0.080"/>
+
+  <!-- ── Pan link  (revolute Z, 37.00 mm, side-view) ─────────────── -->
+  <xacro:property name="pan_l"      value="0.05000"/>   <!-- [EST] -->
+  <xacro:property name="pan_w"      value="0.04561"/>   <!-- 45.61 mm front-view -->
+  <xacro:property name="pan_h"      value="0.03700"/>   <!-- 37.00 mm side-view  -->
+  <xacro:property name="pan_mass"   value="0.080"/>
+
+  <!-- ── Tilt / camera head  (revolute Y, part of 54 mm, side-view) -->
+  <xacro:property name="tilt_l"     value="0.04561"/>   <!-- 45.61 mm  -->
+  <xacro:property name="tilt_w"     value="0.05000"/>   <!-- [EST]     -->
+  <xacro:property name="tilt_h"     value="0.03000"/>   <!-- [EST]     -->
+  <xacro:property name="tilt_mass"  value="0.060"/>
+
+  <!-- ── RGB camera module ────────────────────────────────────────── -->
+  <xacro:property name="cam_l"      value="0.03000"/>   <!-- [EST] -->
+  <xacro:property name="cam_w"      value="0.03000"/>   <!-- [EST] -->
+  <xacro:property name="cam_h"      value="0.02500"/>   <!-- [EST] -->
+  <xacro:property name="cam_mass"   value="0.030"/>
+
+  <!-- ── Depth / IR sensor bar ────────────────────────────────────── -->
+  <xacro:property name="depth_l"    value="0.02500"/>   <!-- [EST] -->
+  <xacro:property name="depth_w"    value="0.07000"/>   <!-- [EST] -->
+  <xacro:property name="depth_h"    value="0.02000"/>   <!-- [EST] -->
+  <xacro:property name="depth_mass" value="0.040"/>
+
+  <!-- ── Picatinny rail  (top of camera head) ─────────────────────── -->
+  <xacro:property name="rail_l"     value="0.01000"/>   <!-- [EST] -->
+  <xacro:property name="rail_w"     value="0.06000"/>   <!-- [EST] -->
+  <xacro:property name="rail_h"     value="0.00800"/>   <!-- [EST] -->
+  <xacro:property name="rail_mass"  value="0.015"/>
+
+  <!-- ================================================================
+       1.  MATERIALS
+       ================================================================ -->
+  <material name="matte_black"> <color rgba="0.08 0.08 0.08 1.0"/> </material>
+  <material name="dark_grey">   <color rgba="0.20 0.20 0.20 1.0"/> </material>
+  <material name="mid_grey">    <color rgba="0.40 0.40 0.40 1.0"/> </material>
+  <material name="silver">      <color rgba="0.70 0.70 0.70 1.0"/> </material>
+
+  <!-- ================================================================
+       2.  INERTIA MACROS
+       ================================================================ -->
+  <xacro:macro name="box_inertia" params="m l w h">
+    <inertial>
+      <mass value="${m}"/>
+      <inertia ixx="${m*(w*w+h*h)/12.0}" ixy="0" ixz="0"
+               iyy="${m*(l*l+h*h)/12.0}" iyz="0"
+               izz="${m*(l*l+w*w)/12.0}"/>
+    </inertial>
+  </xacro:macro>
+
+  <xacro:macro name="cyl_inertia" params="m r h">
+    <inertial>
+      <mass value="${m}"/>
+      <inertia ixx="${m*(3.0*r*r+h*h)/12.0}" ixy="0" ixz="0"
+               iyy="${m*(3.0*r*r+h*h)/12.0}" iyz="0"
+               izz="${m*r*r/2.0}"/>
+    </inertial>
+  </xacro:macro>
+
+  <!-- ================================================================
+       3.  WHEEL MACROS
+           Cylinder's native axis is Z; rpy "pi/2 0 0" rotates it so
+           the spin axis aligns with world Y.
+       ================================================================ -->
+  <xacro:macro name="wheel_link" params="name r wlen mass">
+    <link name="${name}">
+      <visual>
+        <geometry><cylinder radius="${r}" length="${wlen}"/></geometry>
+        <material name="matte_black"/>
+      </visual>
+      <collision>
+        <geometry><cylinder radius="${r}" length="${wlen}"/></geometry>
+      </collision>
+      <xacro:cyl_inertia m="${mass}" r="${r}" h="${wlen}"/>
+    </link>
+  </xacro:macro>
+
+  <xacro:macro name="wheel_joint" params="name parent x y z">
+    <joint name="${name}_joint" type="continuous">
+      <parent link="${parent}"/>
+      <child  link="${name}"/>
+      <origin xyz="${x} ${y} ${z}" rpy="${pi/2} 0 0"/>
+      <axis xyz="0 0 1"/>
+      <dynamics damping="0.05" friction="0.10"/>
+    </joint>
+  </xacro:macro>
+
+  <!-- ================================================================
+       4.  BASE FOOTPRINT  (ground-plane projection, z = 0)
+       ================================================================ -->
+  <link name="base_footprint"/>
+
+  <joint name="base_footprint_joint" type="fixed">
+    <parent link="base_footprint"/>
+    <child  link="base_link"/>
+    <!-- Raise base_link to the chassis centroid height above ground -->
+    <origin xyz="0 0 ${chassis_cog_z}" rpy="0 0 0"/>
+    <!--  chassis_cog_z = 0.02513 + 0.04687 = 0.07200 m  -->
+  </joint>
+
+  <!-- ================================================================
+       5.  BASE LINK  (chassis centroid)
+       ================================================================ -->
+  <link name="base_link">
+    <visual>
+      <geometry>
+        <box size="${chassis_l} ${chassis_w} ${chassis_h}"/>
+      </geometry>
+      <material name="matte_black"/>
+    </visual>
+    <collision>
+      <geometry>
+        <box size="${chassis_l} ${chassis_w} ${chassis_h}"/>
+      </geometry>
+    </collision>
+    <xacro:box_inertia m="${chassis_mass}"
+                       l="${chassis_l}" w="${chassis_w}" h="${chassis_h}"/>
+  </link>
+
+  <!-- ================================================================
+       6.  CORNER WHEELS  (4 ×  continuous joints)
+       ================================================================ -->
+  <xacro:wheel_link name="front_left_wheel"
+                    r="${wheel_r}" wlen="${wheel_len}" mass="${wheel_mass}"/>
+  <xacro:wheel_joint name="front_left_wheel"  parent="base_link"
+                     x="${ wheel_x_bl}"  y="${ wheel_y_bl}"  z="${wheel_z_bl}"/>
+
+  <xacro:wheel_link name="front_right_wheel"
+                    r="${wheel_r}" wlen="${wheel_len}" mass="${wheel_mass}"/>
+  <xacro:wheel_joint name="front_right_wheel" parent="base_link"
+                     x="${ wheel_x_bl}"  y="${-wheel_y_bl}" z="${wheel_z_bl}"/>
+
+  <xacro:wheel_link name="rear_left_wheel"
+                    r="${wheel_r}" wlen="${wheel_len}" mass="${wheel_mass}"/>
+  <xacro:wheel_joint name="rear_left_wheel"   parent="base_link"
+                     x="${-wheel_x_bl}"  y="${ wheel_y_bl}"  z="${wheel_z_bl}"/>
+
+  <xacro:wheel_link name="rear_right_wheel"
+                    r="${wheel_r}" wlen="${wheel_len}" mass="${wheel_mass}"/>
+  <xacro:wheel_joint name="rear_right_wheel"  parent="base_link"
+                     x="${-wheel_x_bl}"  y="${-wheel_y_bl}" z="${wheel_z_bl}"/>
+
+  <!-- ================================================================
+       7.  MID BOGIE WHEELS  (2 ×  passive continuous joints)
+       ================================================================ -->
+  <xacro:wheel_link name="mid_left_wheel"
+                    r="${bogie_r}" wlen="${bogie_len}" mass="${bogie_mass}"/>
+  <xacro:wheel_joint name="mid_left_wheel"  parent="base_link"
+                     x="0" y="${ bogie_y_bl}" z="${bogie_z_bl}"/>
+
+  <xacro:wheel_link name="mid_right_wheel"
+                    r="${bogie_r}" wlen="${bogie_len}" mass="${bogie_mass}"/>
+  <xacro:wheel_joint name="mid_right_wheel" parent="base_link"
+                     x="0" y="${-bogie_y_bl}" z="${bogie_z_bl}"/>
+
+  <!-- ================================================================
+       8.  TOP DECK PLATE
+       ================================================================ -->
+  <link name="deck_plate">
+    <visual>
+      <geometry>
+        <box size="${deck_l} ${deck_w} ${deck_h}"/>
+      </geometry>
+      <material name="dark_grey"/>
+    </visual>
+    <collision>
+      <geometry>
+        <box size="${deck_l} ${deck_w} ${deck_h}"/>
+      </geometry>
+    </collision>
+    <xacro:box_inertia m="${deck_mass}"
+                       l="${deck_l}" w="${deck_w}" h="${deck_h}"/>
+  </link>
+
+  <!-- Bottom of deck rests on chassis top -->
+  <joint name="deck_plate_joint" type="fixed">
+    <parent link="base_link"/>
+    <child  link="deck_plate"/>
+    <origin xyz="0 0 ${chassis_h/2.0 + deck_h/2.0}" rpy="0 0 0"/>
+  </joint>
+
+  <!-- ================================================================
+       9.  FRONT STEREO CAMERA BAR  (126 mm wide, dual lens + 2× LED)
+       ================================================================ -->
+  <link name="front_camera_link">
+    <visual>
+      <geometry>
+        <box size="${fcam_l} ${fcam_w} ${fcam_h}"/>
+      </geometry>
+      <material name="matte_black"/>
+    </visual>
+    <collision>
+      <geometry>
+        <box size="${fcam_l} ${fcam_w} ${fcam_h}"/>
+      </geometry>
+    </collision>
+    <xacro:box_inertia m="${fcam_mass}"
+                       l="${fcam_l}" w="${fcam_w}" h="${fcam_h}"/>
+  </link>
+
+  <!-- Front face of chassis, vertically centred on lower half -->
+  <joint name="front_camera_joint" type="fixed">
+    <parent link="base_link"/>
+    <child  link="front_camera_link"/>
+    <origin xyz="${chassis_l/2.0 - fcam_l/2.0}
+                  0
+                  ${-chassis_h/4.0}"
+            rpy="0 0 0"/>
+  </joint>
+
+  <!-- Optical frame (Z forward, X right, Y down) -->
+  <link name="front_camera_optical_frame"/>
+  <joint name="front_camera_optical_joint" type="fixed">
+    <parent link="front_camera_link"/>
+    <child  link="front_camera_optical_frame"/>
+    <origin xyz="0 0 0" rpy="${-pi/2} 0 ${-pi/2}"/>
+  </joint>
+
+  <!-- ================================================================
+       10.  DECK LiDAR
+       ================================================================ -->
+  <link name="lidar_link">
+    <visual>
+      <geometry>
+        <cylinder radius="${lidar_r}" length="${lidar_h}"/>
+      </geometry>
+      <material name="matte_black"/>
+    </visual>
+    <collision>
+      <geometry>
+        <cylinder radius="${lidar_r}" length="${lidar_h}"/>
+      </geometry>
+    </collision>
+    <xacro:cyl_inertia m="${lidar_mass}" r="${lidar_r}" h="${lidar_h}"/>
+  </link>
+
+  <!-- Positioned slightly to the rear-right on the deck plate -->
+  <joint name="lidar_joint" type="fixed">
+    <parent link="deck_plate"/>
+    <child  link="lidar_link"/>
+    <origin xyz="-0.025 -0.040 ${deck_h/2.0 + lidar_h/2.0}" rpy="0 0 0"/>
+  </joint>
+
+  <!-- ================================================================
+       11.  ARM LOWER COLUMN  (fixed, 28.00 mm from side-view)
+       ================================================================ -->
+  <link name="arm_column">
+    <visual>
+      <geometry>
+        <cylinder radius="${arm_col_r}" length="${arm_col_h}"/>
+      </geometry>
+      <material name="silver"/>
+    </visual>
+    <collision>
+      <geometry>
+        <cylinder radius="${arm_col_r}" length="${arm_col_h}"/>
+      </geometry>
+    </collision>
+    <xacro:cyl_inertia m="${arm_col_m}" r="${arm_col_r}" h="${arm_col_h}"/>
+  </link>
+
+  <!-- Mounted at deck centre, slightly forward -->
+  <joint name="arm_column_joint" type="fixed">
+    <parent link="deck_plate"/>
+    <child  link="arm_column"/>
+    <origin xyz="0.010 0 ${deck_h/2.0 + arm_col_h/2.0}" rpy="0 0 0"/>
+  </joint>
+
+  <!-- ================================================================
+       12.  PAN LINK  –  revolute Z  (yaw, ±90°)
+            Height section = 37.00 mm from side-view
+       ================================================================ -->
+  <link name="pan_link">
+    <visual>
+      <geometry>
+        <box size="${pan_l} ${pan_w} ${pan_h}"/>
+      </geometry>
+      <material name="dark_grey"/>
+    </visual>
+    <collision>
+      <geometry>
+        <box size="${pan_l} ${pan_w} ${pan_h}"/>
+      </geometry>
+    </collision>
+    <xacro:box_inertia m="${pan_mass}"
+                       l="${pan_l}" w="${pan_w}" h="${pan_h}"/>
+  </link>
+
+  <joint name="pan_joint" type="revolute">
+    <parent link="arm_column"/>
+    <child  link="pan_link"/>
+    <origin xyz="0 0 ${arm_col_h/2.0 + pan_h/2.0}" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="${-pi/2}" upper="${pi/2}" effort="2.0" velocity="1.5"/>
+    <dynamics damping="0.08" friction="0.05"/>
+  </joint>
+
+  <!-- ================================================================
+       13.  TILT LINK  –  revolute Y  (pitch, -30°…+60°)
+            Camera head section ≈ 54 mm total from side-view
+       ================================================================ -->
+  <link name="tilt_link">
+    <visual>
+      <geometry>
+        <box size="${tilt_l} ${tilt_w} ${tilt_h}"/>
+      </geometry>
+      <material name="dark_grey"/>
+    </visual>
+    <collision>
+      <geometry>
+        <box size="${tilt_l} ${tilt_w} ${tilt_h}"/>
+      </geometry>
+    </collision>
+    <xacro:box_inertia m="${tilt_mass}"
+                       l="${tilt_l}" w="${tilt_w}" h="${tilt_h}"/>
+  </link>
+
+  <joint name="tilt_joint" type="revolute">
+    <parent link="pan_link"/>
+    <child  link="tilt_link"/>
+    <origin xyz="0 0 ${pan_h/2.0 + tilt_h/2.0}" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <!-- negative = tilting up, positive = tilting down -->
+    <limit lower="${-pi/6}" upper="${pi/3}" effort="2.0" velocity="1.5"/>
+    <dynamics damping="0.08" friction="0.05"/>
+  </joint>
+
+  <!-- ================================================================
+       14.  RGB CAMERA MODULE  (on forward face of tilt head)
+       ================================================================ -->
+  <link name="camera_link">
+    <visual>
+      <geometry>
+        <box size="${cam_l} ${cam_w} ${cam_h}"/>
+      </geometry>
+      <material name="matte_black"/>
+    </visual>
+    <collision>
+      <geometry>
+        <box size="${cam_l} ${cam_w} ${cam_h}"/>
+      </geometry>
+    </collision>
+    <xacro:box_inertia m="${cam_mass}"
+                       l="${cam_l}" w="${cam_w}" h="${cam_h}"/>
+  </link>
+
+  <joint name="camera_joint" type="fixed">
+    <parent link="tilt_link"/>
+    <child  link="camera_link"/>
+    <!-- forward-left of tilt head, upper half -->
+    <origin xyz="${tilt_l/2.0 - cam_l/2.0}
+                  ${-tilt_w/4.0}
+                  ${tilt_h/4.0}"
+            rpy="0 0 0"/>
+  </joint>
+
+  <!-- Optical frame -->
+  <link name="camera_optical_frame"/>
+  <joint name="camera_optical_joint" type="fixed">
+    <parent link="camera_link"/>
+    <child  link="camera_optical_frame"/>
+    <origin xyz="0 0 0" rpy="${-pi/2} 0 ${-pi/2}"/>
+  </joint>
+
+  <!-- ================================================================
+       15.  DEPTH / IR SENSOR BAR  (wide bar, lower-front of tilt head)
+       ================================================================ -->
+  <link name="depth_sensor_link">
+    <visual>
+      <geometry>
+        <box size="${depth_l} ${depth_w} ${depth_h}"/>
+      </geometry>
+      <material name="dark_grey"/>
+    </visual>
+    <collision>
+      <geometry>
+        <box size="${depth_l} ${depth_w} ${depth_h}"/>
+      </geometry>
+    </collision>
+    <xacro:box_inertia m="${depth_mass}"
+                       l="${depth_l}" w="${depth_w}" h="${depth_h}"/>
+  </link>
+
+  <joint name="depth_sensor_joint" type="fixed">
+    <parent link="tilt_link"/>
+    <child  link="depth_sensor_link"/>
+    <origin xyz="${tilt_l/2.0 - depth_l/2.0}
+                  0
+                  ${-(tilt_h/2.0 - depth_h/2.0)}"
+            rpy="0 0 0"/>
+  </joint>
+
+  <!-- Depth optical frame -->
+  <link name="depth_optical_frame"/>
+  <joint name="depth_optical_joint" type="fixed">
+    <parent link="depth_sensor_link"/>
+    <child  link="depth_optical_frame"/>
+    <origin xyz="0 0 0" rpy="${-pi/2} 0 ${-pi/2}"/>
+  </joint>
+
+  <!-- ================================================================
+       16.  PICATINNY RAIL  (on top of tilt head, accessory mount)
+       ================================================================ -->
+  <link name="rail_link">
+    <visual>
+      <geometry>
+        <box size="${rail_l} ${rail_w} ${rail_h}"/>
+      </geometry>
+      <material name="mid_grey"/>
+    </visual>
+    <collision>
+      <geometry>
+        <box size="${rail_l} ${rail_w} ${rail_h}"/>
+      </geometry>
+    </collision>
+    <xacro:box_inertia m="${rail_mass}"
+                       l="${rail_l}" w="${rail_w}" h="${rail_h}"/>
+  </link>
+
+  <joint name="rail_joint" type="fixed">
+    <parent link="tilt_link"/>
+    <child  link="rail_link"/>
+    <origin xyz="0 0 ${tilt_h/2.0 + rail_h/2.0}" rpy="0 0 0"/>
+  </joint>
+
+  <!-- ================================================================
+       17.  IMU  (virtual sensor frame at chassis centroid)
+       ================================================================ -->
+  <link name="imu_link"/>
+  <joint name="imu_joint" type="fixed">
+    <parent link="base_link"/>
+    <child  link="imu_link"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <!-- ================================================================
+       18.  GAZEBO SIM PLUGINS  (Gazebo Harmonic / Garden)
+       ================================================================ -->
+
+  <!-- ── Wheel surface friction ────────────────────────────────────── -->
+  <xacro:macro name="wheel_gazebo" params="name">
+    <gazebo reference="${name}">
+      <mu1>1.0</mu1>
+      <mu2>1.0</mu2>
+      <kp>1000000.0</kp>
+      <kd>100.0</kd>
+      <minDepth>0.001</minDepth>
+    </gazebo>
+  </xacro:macro>
+
+  <xacro:wheel_gazebo name="front_left_wheel"/>
+  <xacro:wheel_gazebo name="front_right_wheel"/>
+  <xacro:wheel_gazebo name="rear_left_wheel"/>
+  <xacro:wheel_gazebo name="rear_right_wheel"/>
+  <xacro:wheel_gazebo name="mid_left_wheel"/>
+  <xacro:wheel_gazebo name="mid_right_wheel"/>
+
+  <!-- ── Skid-steer drive (front + rear driven pairs) ──────────────── -->
+  <gazebo>
+    <plugin filename="gz-sim-diff-drive-system"
+            name="gz::sim::systems::DiffDrive">
+      <left_joint>front_left_wheel_joint</left_joint>
+      <right_joint>front_right_wheel_joint</right_joint>
+      <left_joint>rear_left_wheel_joint</left_joint>
+      <right_joint>rear_right_wheel_joint</right_joint>
+      <wheel_separation>${2.0 * wheel_y_bl}</wheel_separation>
+      <wheel_radius>${wheel_r}</wheel_radius>
+      <topic>cmd_vel</topic>
+      <odom_topic>odom</odom_topic>
+      <tf_topic>/tf</tf_topic>
+      <frame_id>odom</frame_id>
+      <child_frame_id>base_footprint</child_frame_id>
+      <odom_publish_frequency>30</odom_publish_frequency>
+    </plugin>
+  </gazebo>
+
+  <!-- ── Joint state publisher ─────────────────────────────────────── -->
+  <gazebo>
+    <plugin filename="gz-sim-joint-state-publisher-system"
+            name="gz::sim::systems::JointStatePublisher">
+      <topic>joint_states</topic>
+      <joint_name>pan_joint</joint_name>
+      <joint_name>tilt_joint</joint_name>
+      <joint_name>front_left_wheel_joint</joint_name>
+      <joint_name>front_right_wheel_joint</joint_name>
+      <joint_name>rear_left_wheel_joint</joint_name>
+      <joint_name>rear_right_wheel_joint</joint_name>
+      <joint_name>mid_left_wheel_joint</joint_name>
+      <joint_name>mid_right_wheel_joint</joint_name>
+    </plugin>
+  </gazebo>
+
+  <!-- ── Deck LiDAR (2-D laser scan) ───────────────────────────────── -->
+  <gazebo reference="lidar_link">
+    <sensor name="lidar_sensor" type="gpu_lidar">
+      <topic>scan</topic>
+      <update_rate>10</update_rate>
+      <gz_frame_id>lidar_link</gz_frame_id>
+      <lidar>
+        <scan>
+          <horizontal>
+            <samples>360</samples>
+            <resolution>1</resolution>
+            <min_angle>-3.14159265</min_angle>
+            <max_angle> 3.14159265</max_angle>
+          </horizontal>
+        </scan>
+        <range>
+          <min>0.12</min>
+          <max>12.0</max>
+          <resolution>0.01</resolution>
+        </range>
+        <noise>
+          <type>gaussian</type>
+          <mean>0.0</mean>
+          <stddev>0.01</stddev>
+        </noise>
+      </lidar>
+      <always_on>true</always_on>
+      <visualize>true</visualize>
+    </sensor>
+  </gazebo>
+
+  <!-- ── RGB camera (pan-tilt head) ────────────────────────────────── -->
+  <gazebo reference="camera_link">
+    <sensor name="rgb_camera" type="camera">
+      <topic>camera</topic>
+      <update_rate>30</update_rate>
+      <gz_frame_id>camera_optical_frame</gz_frame_id>
+      <camera>
+        <horizontal_fov>1.3962634</horizontal_fov>
+        <image>
+          <width>640</width>
+          <height>480</height>
+          <format>R8G8B8</format>
+        </image>
+        <clip>
+          <near>0.02</near>
+          <far>100.0</far>
+        </clip>
+        <noise>
+          <type>gaussian</type>
+          <mean>0.0</mean>
+          <stddev>0.007</stddev>
+        </noise>
+      </camera>
+      <always_on>true</always_on>
+      <visualize>false</visualize>
+    </sensor>
+  </gazebo>
+
+  <!-- ── Depth / IR sensor ─────────────────────────────────────────── -->
+  <gazebo reference="depth_sensor_link">
+    <sensor name="depth_sensor" type="depth_camera">
+      <topic>depth_camera</topic>
+      <update_rate>30</update_rate>
+      <gz_frame_id>depth_optical_frame</gz_frame_id>
+      <camera>
+        <horizontal_fov>1.0471975512</horizontal_fov>
+        <image>
+          <width>640</width>
+          <height>480</height>
+        </image>
+        <clip>
+          <near>0.05</near>
+          <far>10.0</far>
+        </clip>
+      </camera>
+      <always_on>true</always_on>
+      <visualize>false</visualize>
+    </sensor>
+  </gazebo>
+
+  <!-- ── Front stereo camera bar ───────────────────────────────────── -->
+  <gazebo reference="front_camera_link">
+    <sensor name="front_camera" type="camera">
+      <topic>front_camera</topic>
+      <update_rate>30</update_rate>
+      <gz_frame_id>front_camera_optical_frame</gz_frame_id>
+      <camera>
+        <horizontal_fov>1.5707963</horizontal_fov>
+        <image>
+          <width>1280</width>
+          <height>720</height>
+          <format>R8G8B8</format>
+        </image>
+        <clip>
+          <near>0.05</near>
+          <far>200.0</far>
+        </clip>
+      </camera>
+      <always_on>true</always_on>
+      <visualize>false</visualize>
+    </sensor>
+  </gazebo>
+
+  <!-- ── IMU ───────────────────────────────────────────────────────── -->
+  <gazebo reference="imu_link">
+    <sensor name="imu_sensor" type="imu">
+      <topic>imu/data</topic>
+      <update_rate>100</update_rate>
+      <gz_frame_id>imu_link</gz_frame_id>
+      <always_on>true</always_on>
+      <imu>
+        <angular_velocity>
+          <x><noise type="gaussian"><mean>0.0</mean><stddev>2e-4</stddev></noise></x>
+          <y><noise type="gaussian"><mean>0.0</mean><stddev>2e-4</stddev></noise></y>
+          <z><noise type="gaussian"><mean>0.0</mean><stddev>2e-4</stddev></noise></z>
+        </angular_velocity>
+        <linear_acceleration>
+          <x><noise type="gaussian"><mean>0.0</mean><stddev>1.7e-2</stddev></noise></x>
+          <y><noise type="gaussian"><mean>0.0</mean><stddev>1.7e-2</stddev></noise></y>
+          <z><noise type="gaussian"><mean>0.0</mean><stddev>1.7e-2</stddev></noise></z>
+        </linear_acceleration>
+      </imu>
+    </sensor>
+  </gazebo>
+
+</robot>
