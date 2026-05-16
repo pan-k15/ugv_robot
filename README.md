@@ -1,16 +1,22 @@
 # UGV Rover PT — ROS 2 Workspace
 
 ROS 2 packages for the **Waveshare UGV Rover PT** (Raspberry Pi 4B / Pi 5 kit).  
-Covers the full model description and a Gazebo Harmonic simulation stack.
+Covers the full model description, Gazebo Harmonic simulation, and online SLAM mapping.
 
 ---
 
 ## Packages
 
-| Package | Purpose |
-|---|---|
-| `robot_description` | Xacro URDF model + RViz visualisation launch |
-| `robot_simulation` | Gazebo Harmonic simulation + ROS 2 bridge launch |
+| Package | Status | Purpose |
+|---|---|---|
+| `robot_description` | active | Xacro URDF model + RViz visualisation launch |
+| `robot_simulation` | active | Gazebo Harmonic simulation, bridge, worlds |
+| `robot_slam` | active | Online mapping with slam_toolbox |
+| `robot_interfaces` | scaffold | Custom message / service / action definitions |
+| `robot_navigation` | scaffold | Nav2 integration (planned) |
+| `robot_services` | scaffold | Custom ROS 2 service nodes (planned) |
+| `robot_tasks` | scaffold | High-level task logic (planned) |
+| `robot_vision` | scaffold | Camera / perception nodes (planned) |
 
 ---
 
@@ -69,7 +75,7 @@ Front and rear wheel pairs are driven; mid bogie wheels are passive.
 - ROS 2 **Jazzy** (or Humble with Gazebo Garden)
 - Gazebo **Harmonic** (`gz-harmonic`)
 - `ros-$ROS_DISTRO-ros-gz-*` bridge packages
-- `xacro`, `robot-state-publisher`, `joint-state-publisher-gui`, `rviz2`
+- `slam-toolbox`
 
 ```bash
 sudo apt install \
@@ -78,6 +84,7 @@ sudo apt install \
   ros-$ROS_DISTRO-ros-gz-image \
   ros-$ROS_DISTRO-robot-state-publisher \
   ros-$ROS_DISTRO-joint-state-publisher-gui \
+  ros-$ROS_DISTRO-slam-toolbox \
   ros-$ROS_DISTRO-rviz2 \
   ros-$ROS_DISTRO-xacro
 ```
@@ -102,20 +109,18 @@ source install/setup.bash
 ros2 launch robot_description display.launch.py
 ```
 
-Optional arguments:
-
 | Argument | Default | Description |
 |---|---|---|
 | `urdf` | `robot.urdf.xacro` | Path to alternative URDF/Xacro |
 | `use_gui` | `true` | Show joint-slider GUI |
 
-### Gazebo Harmonic Simulation
+---
+
+### Gazebo simulation — empty world
 
 ```bash
 ros2 launch robot_simulation gazebo.launch.py
 ```
-
-Optional arguments:
 
 | Argument | Default | Description |
 |---|---|---|
@@ -123,6 +128,48 @@ Optional arguments:
 | `x`, `y`, `z` | `0 0 0.15` | Spawn position (m) |
 | `yaw` | `0.0` | Spawn heading (rad) |
 | `rviz` | `true` | Open RViz alongside Gazebo |
+
+---
+
+### Gazebo simulation — obstacle world
+
+10 × 10 m enclosed arena with perimeter walls, interior wall segments, cylinder pillars, and box obstacles — designed to give SLAM distinctive loop-closure features.
+
+```bash
+ros2 launch robot_simulation obstacle_sim.launch.py
+```
+
+Accepts the same arguments as `gazebo.launch.py`.
+
+---
+
+### Online SLAM mapping
+
+Run alongside either simulation launch.
+
+```bash
+# Terminal 1 — simulation
+ros2 launch robot_simulation obstacle_sim.launch.py rviz:=false
+
+# Terminal 2 — SLAM
+ros2 launch robot_slam slam.launch.py
+
+# Terminal 3 — drive
+ros2 run teleop_twist_keyboard teleop_twist_keyboard \
+  --ros-args --remap cmd_vel:=/cmd_vel
+```
+
+| Argument | Default | Description |
+|---|---|---|
+| `use_sim_time` | `true` | Set `false` on a real robot |
+| `slam_params_file` | `robot_slam/config/slam.yaml` | Override SLAM parameters |
+
+Verify SLAM is running:
+
+```bash
+ros2 run tf2_ros tf2_echo map odom
+ros2 topic echo /map --once
+```
 
 ---
 
@@ -134,48 +181,41 @@ Optional arguments:
 | `/odom` | `nav_msgs/Odometry` | GZ → ROS |
 | `/tf` | `tf2_msgs/TFMessage` | GZ → ROS |
 | `/joint_states` | `sensor_msgs/JointState` | GZ → ROS |
-| `/scan` | `sensor_msgs/LaserScan` | GZ → ROS |
+| `/scan` | `sensor_msgs/LaserScan` | GZ → ROS (via relay) |
 | `/imu/data` | `sensor_msgs/Imu` | GZ → ROS |
 | `/camera/image_raw` | `sensor_msgs/Image` | GZ → ROS |
 | `/depth_camera/image_raw` | `sensor_msgs/Image` | GZ → ROS |
 | `/depth_camera/points` | `sensor_msgs/PointCloud2` | GZ → ROS |
 | `/front_camera/image_raw` | `sensor_msgs/Image` | GZ → ROS |
 | `/clock` | `rosgraph_msgs/Clock` | GZ → ROS |
+| `/map` | `nav_msgs/OccupancyGrid` | slam_toolbox → ROS |
 
 ---
 
 ## TF Tree
 
 ```
-odom
-└── base_footprint
-    └── base_link
-        ├── front_left_wheel / front_right_wheel
-        ├── rear_left_wheel  / rear_right_wheel
-        ├── mid_left_wheel   / mid_right_wheel
-        ├── front_camera_link → front_camera_optical_frame
-        ├── deck_plate
-        │   ├── lidar_link
-        │   └── arm_column
-        │       └── pan_link
-        │           └── tilt_link
-        │               ├── camera_link → camera_optical_frame
-        │               ├── depth_sensor_link → depth_optical_frame
-        │               └── rail_link
-        └── imu_link
-```
-
----
-
-## Manual drive (quick test)
-
-```bash
-# Teleop keyboard
-ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args --remap cmd_vel:=/cmd_vel
+map                           ← published by slam_toolbox
+└── odom
+    └── base_footprint
+        └── base_link
+            ├── front_left_wheel / front_right_wheel
+            ├── rear_left_wheel  / rear_right_wheel
+            ├── mid_left_wheel   / mid_right_wheel
+            ├── front_camera_link → front_camera_optical_frame
+            ├── deck_plate
+            │   ├── lidar_link
+            │   └── arm_column
+            │       └── pan_link
+            │           └── tilt_link
+            │               ├── camera_link → camera_optical_frame
+            │               ├── depth_sensor_link → depth_optical_frame
+            │               └── rail_link
+            └── imu_link
 ```
 
 ---
 
 ## License
 
-Apache-2.0 — see `robot_description/LICENSE` and `robot_simulation/LICENSE`.
+Apache-2.0 — see each package's `LICENSE` file.

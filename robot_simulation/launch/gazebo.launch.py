@@ -87,8 +87,6 @@ def generate_launch_description():
             '/tf@tf2_msgs/msg/TFMessage[gz.msgs.Pose_V',
             # joint states
             '/joint_states@sensor_msgs/msg/JointState[gz.msgs.Model',
-            # LiDAR
-            '/scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan',
             # IMU
             '/imu/data@sensor_msgs/msg/Imu[gz.msgs.IMU',
             # camera info
@@ -98,6 +96,24 @@ def generate_launch_description():
             # depth point cloud
             '/depth_camera/points@sensor_msgs/msg/PointCloud2[gz.msgs.PointCloudPacked',
         ],
+        parameters=[{'use_sim_time': True}],
+    )
+
+    # ── LiDAR bridge → /scan_raw (frame_id is empty from gz, relay fixes it) ──
+    scan_bridge = Node(
+        package='ros_gz_bridge',
+        executable='parameter_bridge',
+        name='scan_bridge',
+        output='screen',
+        arguments=['/scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan'],
+        remappings=[('/scan', '/scan_raw')],
+        parameters=[{'use_sim_time': True}],
+    )
+
+    scan_relay = Node(
+        package='robot_simulation',
+        executable='scan_relay',
+        output='screen',
         parameters=[{'use_sim_time': True}],
     )
 
@@ -131,6 +147,8 @@ def generate_launch_description():
         robot_state_publisher,
         spawn_robot,
         bridge,
+        scan_bridge,
+        scan_relay,
         image_bridge,
         rviz,
     ])
