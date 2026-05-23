@@ -31,6 +31,7 @@ install(
 install(PROGRAMS
   scripts/scan_relay
   scripts/cmd_vel_relay
+  scripts/odom_tf_publisher
   DESTINATION lib/${PROJECT_NAME}
 )
 

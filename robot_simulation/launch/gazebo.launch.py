@@ -13,6 +13,7 @@ def generate_launch_description():
     pkg_description = FindPackageShare('robot_description')
     pkg_simulation  = FindPackageShare('robot_simulation')
     pkg_ros_gz_sim  = FindPackageShare('ros_gz_sim')
+    pkg_slam        = FindPackageShare('robot_slam')
 
     urdf_path    = PathJoinSubstitution([pkg_description, 'urdf', 'robot.urdf.xacro'])
     default_world = PathJoinSubstitution([pkg_simulation, 'worlds', 'empty.sdf'])
@@ -31,6 +32,11 @@ def generate_launch_description():
         'rviz',
         default_value='true',
         description='Open RViz alongside Gazebo Sim',
+    )
+    use_sim_time_arg = DeclareLaunchArgument(
+        'use_sim_time',
+        default_value='true',
+        description='Use Gazebo simulation clock',
     )
     rviz_config_arg = DeclareLaunchArgument(
         'rviz_config',
@@ -57,7 +63,7 @@ def generate_launch_description():
             'robot_description': ParameterValue(
                 Command(['xacro ', urdf_path]), value_type=str
             ),
-            'use_sim_time': True,
+            'use_sim_time': LaunchConfiguration('use_sim_time'),
         }],
     )
 
@@ -87,10 +93,9 @@ def generate_launch_description():
         arguments=[
             # simulation clock
             '/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock',
-            # drive: cmd_vel ROS→GZ, odom + tf GZ→ROS
+            # drive: cmd_vel ROS→GZ, odom GZ→ROS
             '/cmd_vel@geometry_msgs/msg/Twist]gz.msgs.Twist',
             '/odom@nav_msgs/msg/Odometry[gz.msgs.Odometry',
-            '/tf@tf2_msgs/msg/TFMessage[gz.msgs.Pose_V',
             # joint states
             '/joint_states@sensor_msgs/msg/JointState[gz.msgs.Model',
             # IMU
@@ -102,7 +107,7 @@ def generate_launch_description():
             # depth point cloud
             '/depth_camera/points@sensor_msgs/msg/PointCloud2[gz.msgs.PointCloudPacked',
         ],
-        parameters=[{'use_sim_time': True}],
+        parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}],
     )
 
     # ── LiDAR bridge → /scan_raw (frame_id is empty from gz, relay fixes it) ──
@@ -113,7 +118,7 @@ def generate_launch_description():
         output='screen',
         arguments=['/scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan'],
         remappings=[('/scan', '/scan_raw')],
-        parameters=[{'use_sim_time': True}],
+        parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}],
     )
 
     scan_relay = Node(
@@ -121,9 +126,25 @@ def generate_launch_description():
         executable='scan_relay',
         output='screen',
         parameters=[{
-            'use_sim_time': True,
-            'restamp': True,
+            'use_sim_time': LaunchConfiguration('use_sim_time'),
+            'frame_id': 'laser_link',
+            'restamp': False,
         }],
+    )
+
+    # ── EKF sensor fusion (robot_localization) ───────────────────────
+    # Fuses wheel odometry (/odom) + IMU (/imu/data) and publishes the
+    # authoritative odom→base_footprint TF.  The diff drive's <tf_topic>
+    # is redirected to /gz/tf_unused in the URDF so there is no conflict.
+    ekf_node = Node(
+        package='robot_localization',
+        executable='ekf_node',
+        name='ekf_filter_node',
+        output='screen',
+        parameters=[
+            PathJoinSubstitution([pkg_slam, 'config', 'ekf.yaml']),
+            {'use_sim_time': LaunchConfiguration('use_sim_time')},
+        ],
     )
 
     # ── Image bridges ─────────────────────────────────────────────────
@@ -144,7 +165,7 @@ def generate_launch_description():
             ('/camera',       '/camera/image_raw'),
             ('/front_camera', '/front_camera/image_raw'),
         ],
-        parameters=[{'use_sim_time': True}],
+        parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}],
     )
 
     depth_image_bridge = Node(
@@ -154,7 +175,20 @@ def generate_launch_description():
         output='screen',
         arguments=['/depth_camera@sensor_msgs/msg/Image[gz.msgs.Image'],
         remappings=[('/depth_camera', '/depth_camera/image_raw')],
-        parameters=[{'use_sim_time': True}],
+        parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}],
+    )
+
+    # ── Static map→odom identity transform ───────────────────────────
+    # Keep RViz fixed frame (map) locked to Gazebo world/odom coordinates.
+    # slam_toolbox is configured with transform_publish_period: 0.0 so it
+    # does not publish a competing dynamic map->odom correction.
+    map_odom_static_tf = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='map_odom_static_tf',
+        output='screen',
+        arguments=['0', '0', '0', '0', '0', '0', 'map', 'odom'],
+        parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}],
     )
 
     # ── RViz (optional) ───────────────────────────────────────────────
@@ -163,7 +197,7 @@ def generate_launch_description():
         executable='rviz2',
         output='screen',
         arguments=['-d', LaunchConfiguration('rviz_config')],
-        parameters=[{'use_sim_time': True}],
+        parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}],
         condition=IfCondition(LaunchConfiguration('rviz')),
     )
 
@@ -175,6 +209,7 @@ def generate_launch_description():
         world_arg,
         x_arg, y_arg, z_arg, yaw_arg,
         rviz_arg,
+        use_sim_time_arg,
         rviz_config_arg,
         gz_sim,
         robot_state_publisher,
@@ -182,7 +217,9 @@ def generate_launch_description():
         bridge,
         scan_bridge,
         scan_relay,
+        ekf_node,
         rgb_image_bridge,
         depth_image_bridge,
+        map_odom_static_tf,
         rviz,
     ])

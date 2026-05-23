@@ -13,7 +13,7 @@ from sensor_msgs.msg import LaserScan
 class ScanRelay(Node):
     def __init__(self) -> None:
         super().__init__('scan_relay')
-        self.declare_parameter('frame_id', 'lidar_link')
+        self.declare_parameter('frame_id', 'laser_link')
         self.declare_parameter('restamp', False)
         self._frame = self.get_parameter('frame_id').get_parameter_value().string_value
         self._restamp = self.get_parameter('restamp').get_parameter_value().bool_value

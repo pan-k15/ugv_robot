@@ -50,6 +50,8 @@
                   value="${chassis_l/2.0 - (wheel_r - (total_l - chassis_l)/2.0)}"/>
   <xacro:property name="wheel_y_bl"
                   value="${total_w/2.0 - wheel_len/2.0}"/>
+  <!-- Physical track width: 2 × wheel_y_bl = 2 × (0.23042/2 − 0.052/2) = 0.17842 m -->
+  <xacro:property name="drive_wheel_separation" value="0.17842"/>
 
   <!-- ── Top deck plate ──────────────────────────────────────────── -->
   <xacro:property name="deck_l"     value="0.22000"/>   <!-- [EST] -->
@@ -155,7 +157,7 @@
       <parent link="${parent}"/>
       <child  link="${name}"/>
       <origin xyz="${x} ${y} ${z}" rpy="${pi/2} 0 0"/>
-      <axis xyz="0 0 1"/>
+      <axis xyz="0 0 -1"/>
       <dynamics damping="0.10" friction="0.12"/>
     </joint>
   </xacro:macro>
@@ -301,6 +303,14 @@
     <parent link="deck_plate"/>
     <child  link="lidar_link"/>
     <origin xyz="-0.025 -0.040 ${deck_h/2.0 + lidar_h/2.0}" rpy="0 0 0"/>
+  </joint>
+
+  <!-- Laser scan frame: ROS REP-103, X forward, Y left, Z up. -->
+  <link name="laser_link"/>
+  <joint name="laser_link_joint" type="fixed">
+    <parent link="lidar_link"/>
+    <child  link="laser_link"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
   </joint>
 
   <!-- ================================================================
@@ -503,10 +513,11 @@
   <xacro:macro name="wheel_gazebo" params="name">
     <gazebo reference="${name}">
       <mu1>1.0</mu1>
-      <mu2>1.0</mu2>
-      <kp>1000000.0</kp>
-      <kd>100.0</kd>
-      <minDepth>0.001</minDepth>
+      <mu2>0.2</mu2>
+      <kp>200000.0</kp>
+      <kd>80.0</kd>
+      <minDepth>0.002</minDepth>
+      <maxVel>0.2</maxVel>
     </gazebo>
   </xacro:macro>
 
@@ -523,14 +534,15 @@
       <right_joint>front_right_wheel_joint</right_joint>
       <left_joint>rear_left_wheel_joint</left_joint>
       <right_joint>rear_right_wheel_joint</right_joint>
-      <wheel_separation>${2.0 * wheel_y_bl}</wheel_separation>
+      <wheel_separation>${drive_wheel_separation}</wheel_separation>
       <wheel_radius>${wheel_r}</wheel_radius>
       <topic>/cmd_vel</topic>
       <odom_topic>/odom</odom_topic>
-      <tf_topic>/tf</tf_topic>
+      <!-- EKF (robot_localization) owns odom→base_footprint TF; redirect gz TF so it does not conflict -->
+      <tf_topic>/gz/tf_unused</tf_topic>
       <frame_id>odom</frame_id>
       <child_frame_id>base_footprint</child_frame_id>
-      <odom_publish_frequency>30</odom_publish_frequency>
+      <odom_publish_frequency>50</odom_publish_frequency>
     </plugin>
   </gazebo>
 
@@ -539,6 +551,7 @@
     <plugin filename="gz-sim-joint-state-publisher-system"
             name="gz::sim::systems::JointStatePublisher">
       <topic>/joint_states</topic>
+      <update_rate>50</update_rate>
       <joint_name>pan_joint</joint_name>
       <joint_name>tilt_joint</joint_name>
       <joint_name>front_left_wheel_joint</joint_name>
@@ -549,15 +562,15 @@
   </gazebo>
 
   <!-- ── Deck LiDAR (2-D laser scan) ───────────────────────────────── -->
-  <gazebo reference="lidar_link">
+  <gazebo reference="laser_link">
     <sensor name="lidar_sensor" type="gpu_lidar">
       <topic>scan</topic>
-      <update_rate>15</update_rate>
-      <gz_frame_id>lidar_link</gz_frame_id>
+      <update_rate>20</update_rate>
+      <gz_frame_id>laser_link</gz_frame_id>
       <lidar>
         <scan>
           <horizontal>
-            <samples>180</samples>
+            <samples>360</samples>
             <resolution>1</resolution>
             <min_angle>-3.14159265</min_angle>
             <max_angle> 3.14159265</max_angle>

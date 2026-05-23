@@ -1,0 +1,53 @@
+ekf_filter_node:
+  ros__parameters:
+
+    # ── Timing ───────────────────────────────────────────────────────────
+    frequency:        30.0   # Hz — reduced from 50 to avoid deadline misses under load
+    sensor_timeout:   0.1    # seconds before a sensor is considered timed out
+    two_d_mode:       true   # ignore roll, pitch, z (ground robot)
+
+    # ── Frames ───────────────────────────────────────────────────────────
+    odom_frame:       odom
+    base_link_frame:  base_footprint
+    world_frame:      odom   # EKF runs in odom (local) frame
+
+    # ── TF output ────────────────────────────────────────────────────────
+    # EKF is the sole publisher of odom→base_footprint.
+    # Diff drive's <tf_topic> is redirected to /gz/tf_unused in the URDF
+    # so there is no competing gz-bridge TF on this transform.
+    publish_tf:           true
+    publish_acceleration: false
+    transform_time_offset: 0.0
+    transform_timeout:     0.1
+
+    # ── Wheel odometry (/odom) ───────────────────────────────────────────
+    # State vector indices:
+    #   0  1  2   3     4    5    6   7   8   9     10    11   12  13  14
+    #   x  y  z  roll pitch yaw  vx  vy  vz vroll vpitch vyaw  ax  ay  az
+    odom0: /odom
+    odom0_config: [true,  true,  false,
+                   false, false, true,
+                   true,  false, false,
+                   false, false, true,
+                   false, false, false]
+    odom0_queue_size:    10
+    odom0_differential:  false
+    odom0_relative:      false
+
+    # ── IMU (/imu/data) ──────────────────────────────────────────────────
+    # Use: yaw (orientation), vyaw (gyro z), ax (longitudinal accel).
+    # Roll and pitch are ignored (two_d_mode) but kept false here anyway.
+    imu0: /imu/data
+    imu0_config: [false, false, false,
+                  false, false, true,
+                  false, false, false,
+                  false, false, true,
+                  true,  false, false]
+    imu0_queue_size:                      10
+    imu0_differential:                    false
+    imu0_relative:                        false
+    imu0_remove_gravitational_acceleration: true
+
+    # ── Diagnostics ───────────────────────────────────────────────────────
+    print_diagnostics: false
+    debug:             false

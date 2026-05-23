@@ -1,7 +1,6 @@
 # UGV Rover PT — ROS 2 Workspace
 
-ROS 2 packages for the **Waveshare UGV Rover PT** (Raspberry Pi 4B / Pi 5 kit).  
-Covers the full model description, Gazebo Harmonic simulation, online SLAM mapping, autonomous RRT exploration, obstacle avoidance, Nav2 navigation, and YOLO object detection.
+A complete ROS 2 autonomy stack — from URDF model and Gazebo Harmonic simulation through online SLAM, autonomous frontier exploration, Nav2 point-to-point navigation, reactive obstacle avoidance, and YOLOv8 object detection.
 
 ---
 
@@ -42,7 +41,7 @@ The UGV Rover PT is modeled as a 4-wheel skid-steer ground vehicle (~3.5 kg, 252
 
 Skid-steer via the Gazebo `DiffDrive` plugin.  
 All four corner wheels are driven.  
-`mu1 = 1.0` and `mu2 = 1.0` on all wheels provide balanced contact friction.
+`mu1 = 1.0` (longitudinal) and `mu2 = 0.2` (lateral) on all wheels — low lateral friction allows smooth skid-steer slip during turns.
 
 | Property | Value |
 |---|---|
@@ -265,7 +264,7 @@ ros2 run nav2_map_server map_saver_cli -f ~/my_map
 
 ### 7 — Nav2 autonomous navigation
 
-Full Nav2 stack — MPPI trajectory controller, NavFn global planner, dual costmaps, Behaviour Tree navigator, and velocity smoother.
+Full Nav2 stack — MPPI trajectory controller, NavFn global planner, dual costmaps, Behaviour Tree navigator, and velocity smoother. Max linear speed: **0.5 m/s**. Max angular speed: **1.0 rad/s**.
 
 Two localization sources are supported; choose based on whether you have a pre-built map.
 
@@ -332,12 +331,15 @@ AMCL localises the robot on the known map using particle filtering.
 # Terminal 1 — simulation
 ros2 launch robot_simulation obstacle_sim.launch.py
 
-# Terminal 2 — Nav2 with pre-built map
-ros2 launch robot_navigation navigation.launch.py \
-  map_yaml_file:=/path/to/my_map.yaml
+# Terminal 2 — Localization (map_server + AMCL)
+ros2 launch robot_navigation localization_launch.py \
+  map:=/path/to/my_map.yaml
+
+# Terminal 3 — Nav2 stack
+ros2 launch robot_navigation navigation.launch.py
 ```
 
-This automatically launches **map_server**, **AMCL**, and the full Nav2 stack.
+`localization_launch.py` brings up `map_server` + `amcl` + their lifecycle manager. `navigation.launch.py` brings up the full Nav2 controller/planner/BT stack separately.
 
 **RViz setup (same displays as Mode A, plus):**
 
@@ -371,29 +373,30 @@ Starts `map_server` + `amcl` + their lifecycle manager. Remember to set the **2D
 
 #### Optional EKF odometry fusion
 
-Fuses wheel odometry (`/odom`) and IMU angular velocity + linear acceleration (`/imu/data`) using `robot_localization`'s EKF. Produces a smoother odometry estimate.
+Fuses wheel odometry (`/odom`) and IMU angular velocity + linear acceleration (`/imu/data`) using `robot_localization`'s EKF node. Produces a smoother odometry estimate on top of either localization mode.
 
 ```bash
-ros2 launch robot_navigation navigation.launch.py use_ekf:=true
+# Run as a standalone node alongside the navigation stack
+ros2 run robot_localization ekf_node --ros-args \
+  --params-file $(ros2 pkg prefix robot_slam)/share/robot_slam/config/ekf.yaml
 ```
 
-Can be combined with either localization mode:
-
-```bash
-ros2 launch robot_navigation navigation.launch.py \
-  map_yaml_file:=/path/to/my_map.yaml \
-  use_ekf:=true
-```
+The EKF config is in `robot_slam/config/ekf.yaml`. It runs at **30 Hz** and fuses `/odom` (x, y, yaw, vx, vyaw) with `/imu/data` (yaw rate, ax). It publishes the `odom → base_footprint` TF and an `/odometry/filtered` topic.
 
 ---
 
-#### Launch arguments
+#### Launch arguments (`navigation.launch.py`)
 
 | Argument | Default | Description |
 |---|---|---|
-| `map_yaml_file` | `''` | Path to map `.yaml`. Empty = SLAM mode (no AMCL) |
 | `use_sim_time` | `true` | Use Gazebo `/clock` |
-| `use_ekf` | `false` | Launch `robot_localization` EKF node |
+
+#### Launch arguments (`localization_launch.py`)
+
+| Argument | Default | Description |
+|---|---|---|
+| `map` | *(required)* | Full path to map `.yaml` file |
+| `use_sim_time` | `true` | Use Gazebo `/clock` |
 
 ---
 

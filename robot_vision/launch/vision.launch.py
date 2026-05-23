@@ -14,6 +14,8 @@ def generate_launch_description():
                               description='Inference device: cpu / cuda:0 / mps'),
         DeclareLaunchArgument('image_topic', default_value='/front_camera/image_raw',
                               description='Input image topic'),
+        DeclareLaunchArgument('use_sim_time', default_value='true',
+                              description='Use simulation clock'),
 
         Node(
             package='robot_vision',
@@ -25,6 +27,7 @@ def generate_launch_description():
                 'confidence':  LaunchConfiguration('confidence'),
                 'device':      LaunchConfiguration('device'),
                 'image_topic': LaunchConfiguration('image_topic'),
+                'use_sim_time': LaunchConfiguration('use_sim_time'),
             }],
         ),
     ])
