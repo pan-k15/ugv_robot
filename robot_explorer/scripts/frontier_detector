@@ -1,0 +1,401 @@
+#!/usr/bin/env python3
+"""
+RRT-based frontier detector — interactive boundary mode.
+
+Setup sequence (via RViz → Publish Point, in this exact order)
+--------------------------------------------------------------
+  Click 1–4 : four corners of the rectangular exploration region
+  Click 5   : RRT tree seed point (must be inside a known-free area)
+
+After all five points are received the detector starts running.
+
+Algorithm
+---------
+  Every <detect_period> seconds:
+    1. Build free / unknown masks from /map.
+    2. Grow an RRT from the seed point.
+       Random samples are drawn inside the user-defined polygon only.
+       Any new RRT node that touches a frontier cell is recorded.
+    3. Cluster raw frontier hits (greedy radius-merge).
+    4. Publish each centroid as PointStamped on /detected_points.
+
+Topics
+------
+  Sub : /map               nav_msgs/OccupancyGrid
+  Sub : /clicked_point     geometry_msgs/PointStamped   (RViz Publish Point)
+  Pub : /detected_points   geometry_msgs/PointStamped
+  Pub : /frontier_markers  visualization_msgs/MarkerArray
+  Pub : /exploration_boundary  visualization_msgs/Marker  (boundary + seed viz)
+"""
+import math
+import random
+
+import numpy as np
+import rclpy
+from rclpy.node import Node
+from geometry_msgs.msg import PointStamped
+from nav_msgs.msg import OccupancyGrid
+from visualization_msgs.msg import Marker, MarkerArray
+import tf2_ros
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Geometry utilities
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _point_in_polygon(x: float, y: float, polygon: list) -> bool:
+    """Ray-casting polygon containment test (works for any simple polygon)."""
+    n, inside = len(polygon), False
+    j = n - 1
+    for i in range(n):
+        xi, yi = polygon[i]
+        xj, yj = polygon[j]
+        if ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / (yj - yi) + xi):
+            inside = not inside
+        j = i
+    return inside
+
+
+def _polygon_bbox(polygon: list):
+    xs = [p[0] for p in polygon]
+    ys = [p[1] for p in polygon]
+    return min(xs), max(xs), min(ys), max(ys)
+
+
+def _random_in_polygon(polygon: list, bbox):
+    """Uniformly sample a point inside the polygon (rejection sampling)."""
+    xmin, xmax, ymin, ymax = bbox
+    for _ in range(1000):          # up to 1000 tries
+        rx = random.uniform(xmin, xmax)
+        ry = random.uniform(ymin, ymax)
+        if _point_in_polygon(rx, ry, polygon):
+            return rx, ry
+    # Fallback: return polygon centroid
+    return sum(p[0] for p in polygon) / len(polygon), \
+           sum(p[1] for p in polygon) / len(polygon)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Grid helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _build_masks(data: np.ndarray, width: int, height: int):
+    grid    = data.reshape(height, width).astype(np.int16)
+    free    = (grid >= 0) & (grid < 50)
+    unknown = (grid == -1)
+    return free, unknown
+
+
+def _frontier_mask(free: np.ndarray, unknown: np.ndarray) -> np.ndarray:
+    """Free cell with at least one unknown 4-connected neighbour."""
+    u_n = np.zeros_like(unknown); u_n[1:,  :] = unknown[:-1, :]
+    u_s = np.zeros_like(unknown); u_s[:-1, :] = unknown[1:,  :]
+    u_e = np.zeros_like(unknown); u_e[:,  1:] = unknown[:, :-1]
+    u_w = np.zeros_like(unknown); u_w[:, :-1] = unknown[:, 1:]
+    return free & (u_n | u_s | u_e | u_w)
+
+
+def _world_to_cell(wx, wy, ox, oy, res):
+    return int((wx - ox) / res), int((wy - oy) / res)   # col, row
+
+
+def _cell_to_world(col, row, ox, oy, res):
+    return ox + col * res, oy + row * res
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Clustering
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _cluster(points: list, radius: float) -> list:
+    if not points:
+        return []
+    used, cents = [False] * len(points), []
+    for i in range(len(points)):
+        if used[i]:
+            continue
+        grp = [points[i]]; used[i] = True
+        for j in range(i + 1, len(points)):
+            if not used[j] and math.hypot(points[i][0] - points[j][0],
+                                          points[i][1] - points[j][1]) < radius:
+                grp.append(points[j]); used[j] = True
+        cents.append((sum(p[0] for p in grp) / len(grp),
+                      sum(p[1] for p in grp) / len(grp)))
+    return cents
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Node
+# ─────────────────────────────────────────────────────────────────────────────
+
+BOUNDARY_POINTS_NEEDED = 4   # first 4 clicks = polygon corners
+SEED_POINT_INDEX       = 4   # 5th click = RRT seed
+
+
+class FrontierDetector(Node):
+
+    def __init__(self):
+        super().__init__('frontier_detector')
+
+        self.declare_parameter('rrt_iterations',  600)
+        self.declare_parameter('step_size',        0.5)   # metres
+        self.declare_parameter('cluster_radius',   0.8)   # metres
+        self.declare_parameter('detect_period',    2.0)   # seconds
+
+        self._n_iter  = self.get_parameter('rrt_iterations').get_parameter_value().integer_value
+        self._step    = self.get_parameter('step_size').get_parameter_value().double_value
+        self._cradius = self.get_parameter('cluster_radius').get_parameter_value().double_value
+
+        # TF (used for fallback when seed not yet set)
+        self._tf_buf = tf2_ros.Buffer()
+        self._tf_lis = tf2_ros.TransformListener(self._tf_buf, self)
+
+        # Interactive setup state
+        self._clicked: list[tuple[float, float]] = []   # received world points
+        self._boundary: list[tuple[float, float]] = []  # 4 corners
+        self._seed: tuple[float, float] | None = None   # 5th point
+        self._bbox = None
+
+        # Map
+        self._map: OccupancyGrid | None = None
+
+        # Subs / pubs
+        self.create_subscription(OccupancyGrid, '/map',          self._on_map,     10)
+        self.create_subscription(PointStamped,  '/clicked_point', self._on_clicked, 10)
+
+        self._pt_pub  = self.create_publisher(PointStamped, '/detected_points',       50)
+        self._viz_pub = self.create_publisher(MarkerArray,  '/frontier_markers',      10)
+        self._bnd_pub = self.create_publisher(Marker,       '/exploration_boundary',  10)
+
+        period = self.get_parameter('detect_period').get_parameter_value().double_value
+        self._timer = self.create_timer(period, self._detect)
+
+        self.get_logger().info(
+            '\n'
+            '════════════════════════════════════════════════\n'
+            '  Frontier Detector — awaiting 5 RViz points\n'
+            '  In RViz → Publish Point, click IN ORDER:\n'
+            '    1–4 : four corners of the exploration area\n'
+            '    5   : RRT seed (inside known free space)\n'
+            '════════════════════════════════════════════════'
+        )
+
+    # ──────────────────────────────────────────────────────────────────
+    #  Callbacks
+    # ──────────────────────────────────────────────────────────────────
+
+    def _on_map(self, msg: OccupancyGrid):
+        self._map = msg
+
+    def _on_clicked(self, msg: PointStamped):
+        n = len(self._clicked)
+        x, y = msg.point.x, msg.point.y
+        self._clicked.append((x, y))
+        n_received = len(self._clicked)
+
+        if n_received <= BOUNDARY_POINTS_NEEDED:
+            self.get_logger().info(
+                f'Boundary point {n_received}/4 received: ({x:.2f}, {y:.2f})')
+            if n_received == BOUNDARY_POINTS_NEEDED:
+                self._boundary = list(self._clicked)
+                self._bbox     = _polygon_bbox(self._boundary)
+                self._publish_boundary_viz()
+                self.get_logger().info(
+                    'Boundary set.  Now click the RRT seed point (point 5/5).')
+
+        elif n_received == BOUNDARY_POINTS_NEEDED + 1:
+            self._seed = (x, y)
+            self._publish_seed_viz(x, y)
+            self.get_logger().info(
+                f'Seed point received: ({x:.2f}, {y:.2f})\n'
+                '→ Exploration starting!'
+            )
+
+    # ──────────────────────────────────────────────────────────────────
+    #  Visualisation
+    # ──────────────────────────────────────────────────────────────────
+
+    def _publish_boundary_viz(self):
+        mk             = Marker()
+        mk.header.frame_id = 'map'
+        mk.header.stamp    = self.get_clock().now().to_msg()
+        mk.ns, mk.id   = 'boundary', 0
+        mk.type        = Marker.LINE_STRIP
+        mk.action      = Marker.ADD
+        mk.scale.x     = 0.05
+        mk.color.g     = 1.0
+        mk.color.a     = 1.0
+        mk.pose.orientation.w = 1.0
+        from geometry_msgs.msg import Point
+        for (bx, by) in self._boundary + [self._boundary[0]]:   # close the loop
+            p = Point(); p.x = bx; p.y = by; p.z = 0.1
+            mk.points.append(p)
+        self._bnd_pub.publish(mk)
+
+    def _publish_seed_viz(self, sx, sy):
+        mk             = Marker()
+        mk.header.frame_id = 'map'
+        mk.header.stamp    = self.get_clock().now().to_msg()
+        mk.ns, mk.id   = 'seed', 1
+        mk.type        = Marker.SPHERE
+        mk.action      = Marker.ADD
+        mk.pose.position.x = sx
+        mk.pose.position.y = sy
+        mk.pose.orientation.w = 1.0
+        mk.scale.x = mk.scale.y = mk.scale.z = 0.35
+        mk.color.b = 1.0; mk.color.g = 1.0; mk.color.a = 1.0   # cyan
+        self._bnd_pub.publish(mk)
+
+    # ──────────────────────────────────────────────────────────────────
+    #  Detection
+    # ──────────────────────────────────────────────────────────────────
+
+    def _detect(self):
+        # Wait until all 5 points have been provided
+        if self._seed is None or not self._boundary:
+            remaining = 5 - len(self._clicked)
+            if remaining > 0:
+                self.get_logger().info(
+                    f'Waiting for {remaining} more point(s) in RViz …',
+                    throttle_duration_sec=5.0)
+            return
+
+        if self._map is None:
+            self.get_logger().warn('No map yet — waiting for slam_toolbox',
+                                   throttle_duration_sec=5.0)
+            return
+
+        m      = self._map
+        width  = m.info.width
+        height = m.info.height
+        res    = m.info.resolution
+        ox     = m.info.origin.position.x
+        oy     = m.info.origin.position.y
+        data   = np.array(m.data, dtype=np.int16)
+
+        free, unknown = _build_masks(data, width, height)
+        f_mask        = _frontier_mask(free, unknown)
+        frontier_cells = set(map(tuple, np.argwhere(f_mask)))   # (row, col)
+
+        if not frontier_cells:
+            return
+
+        # ── Convert seed to grid cell ──────────────────────────────────
+        sx, sy     = self._seed
+        seed_col   = int((sx - ox) / res)
+        seed_row   = int((sy - oy) / res)
+
+        # Ensure seed is in a free cell (search nearby if not)
+        if not (0 <= seed_col < width and 0 <= seed_row < height
+                and free[seed_row, seed_col]):
+            found = False
+            for dr in range(1, 15):
+                for dc in range(-dr, dr + 1):
+                    r, c = seed_row + dr, seed_col + dc
+                    if 0 <= r < height and 0 <= c < width and free[r, c]:
+                        seed_row, seed_col = r, c
+                        found = True
+                        break
+                if found:
+                    break
+            if not found:
+                self.get_logger().warn('Seed point is not in free space — skip')
+                return
+
+        step_cells  = max(1, int(self._step / res))
+        tree        = [(seed_col, seed_row)]
+        found_fron  = []
+
+        # ── RRT growth confined to boundary polygon ────────────────────
+        for _ in range(self._n_iter):
+            # Sample a random world point inside the boundary polygon
+            wx_rand, wy_rand = _random_in_polygon(self._boundary, self._bbox)
+
+            # Convert to grid
+            rc = int((wx_rand - ox) / res)
+            rr = int((wy_rand - oy) / res)
+
+            if not (0 <= rc < width and 0 <= rr < height):
+                continue
+            if not free[rr, rc]:
+                continue
+
+            # Nearest tree node
+            nc, nr = min(tree, key=lambda n: (n[0] - rc) ** 2 + (n[1] - rr) ** 2)
+
+            dc   = rc - nc
+            dr   = rr - nr
+            dist = math.hypot(dc, dr)
+            if dist == 0:
+                continue
+
+            new_col = nc + int(dc / dist * step_cells)
+            new_row = nr + int(dr / dist * step_cells)
+
+            if not (0 <= new_col < width and 0 <= new_row < height):
+                continue
+            if not free[new_row, new_col]:
+                continue
+
+            # Check new node is still inside boundary
+            nwx, nwy = _cell_to_world(new_col, new_row, ox, oy, res)
+            if not _point_in_polygon(nwx, nwy, self._boundary):
+                continue
+
+            tree.append((new_col, new_row))
+
+            if (new_row, new_col) in frontier_cells:
+                found_fron.append(_cell_to_world(new_col, new_row, ox, oy, res))
+
+        if not found_fron:
+            return
+
+        # ── Cluster and publish ────────────────────────────────────────
+        centroids = _cluster(found_fron, self._cradius)
+        now       = self.get_clock().now().to_msg()
+        markers   = MarkerArray()
+
+        del_mk        = Marker()
+        del_mk.action = Marker.DELETEALL
+        markers.markers.append(del_mk)
+
+        for i, (wx, wy) in enumerate(centroids):
+            pt                 = PointStamped()
+            pt.header.stamp    = now
+            pt.header.frame_id = 'map'
+            pt.point.x         = wx
+            pt.point.y         = wy
+            self._pt_pub.publish(pt)
+
+            mk                    = Marker()
+            mk.header.frame_id    = 'map'
+            mk.header.stamp       = now
+            mk.ns, mk.id          = 'frontiers', i
+            mk.type               = Marker.SPHERE
+            mk.action             = Marker.ADD
+            mk.pose.position.x    = wx
+            mk.pose.position.y    = wy
+            mk.pose.orientation.w = 1.0
+            mk.scale.x = mk.scale.y = mk.scale.z = 0.25
+            mk.color.r = 1.0; mk.color.g = 0.4; mk.color.a = 1.0
+            markers.markers.append(mk)
+
+        self._viz_pub.publish(markers)
+        self.get_logger().info(
+            f'RRT: {len(found_fron)} raw hits → {len(centroids)} centroids'
+            f'  (tree size: {len(tree)})')
+
+        # Re-publish boundary so it stays visible in RViz
+        self._publish_boundary_viz()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+def main():
+    rclpy.init()
+    rclpy.spin(FrontierDetector())
+    rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()

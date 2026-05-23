@@ -51,13 +51,6 @@
   <xacro:property name="wheel_y_bl"
                   value="${total_w/2.0 - wheel_len/2.0}"/>
 
-  <!-- ── Mid bogie wheels  (smaller passive rollers, between corners) -->
-  <xacro:property name="bogie_r"    value="0.03000"/>   <!-- [EST] 30 mm radius -->
-  <xacro:property name="bogie_len"  value="0.04500"/>   <!-- [EST] 45 mm axial  -->
-  <xacro:property name="bogie_mass" value="0.120"/>
-  <xacro:property name="bogie_z_bl" value="${bogie_r - chassis_cog_z}"/>
-  <xacro:property name="bogie_y_bl" value="${total_w/2.0 - bogie_len/2.0}"/>
-
   <!-- ── Top deck plate ──────────────────────────────────────────── -->
   <xacro:property name="deck_l"     value="0.22000"/>   <!-- [EST] -->
   <xacro:property name="deck_w"     value="0.15622"/>   <!-- 156.22 mm inner plate  -->
@@ -163,7 +156,7 @@
       <child  link="${name}"/>
       <origin xyz="${x} ${y} ${z}" rpy="${pi/2} 0 0"/>
       <axis xyz="0 0 1"/>
-      <dynamics damping="0.05" friction="0.10"/>
+      <dynamics damping="0.10" friction="0.12"/>
     </joint>
   </xacro:macro>
 
@@ -221,19 +214,6 @@
                     r="${wheel_r}" wlen="${wheel_len}" mass="${wheel_mass}"/>
   <xacro:wheel_joint name="rear_right_wheel"  parent="base_link"
                      x="${-wheel_x_bl}"  y="${-wheel_y_bl}" z="${wheel_z_bl}"/>
-
-  <!-- ================================================================
-       7.  MID BOGIE WHEELS  (2 ×  passive continuous joints)
-       ================================================================ -->
-  <xacro:wheel_link name="mid_left_wheel"
-                    r="${bogie_r}" wlen="${bogie_len}" mass="${bogie_mass}"/>
-  <xacro:wheel_joint name="mid_left_wheel"  parent="base_link"
-                     x="0" y="${ bogie_y_bl}" z="${bogie_z_bl}"/>
-
-  <xacro:wheel_link name="mid_right_wheel"
-                    r="${bogie_r}" wlen="${bogie_len}" mass="${bogie_mass}"/>
-  <xacro:wheel_joint name="mid_right_wheel" parent="base_link"
-                     x="0" y="${-bogie_y_bl}" z="${bogie_z_bl}"/>
 
   <!-- ================================================================
        8.  TOP DECK PLATE
@@ -534,8 +514,6 @@
   <xacro:wheel_gazebo name="front_right_wheel"/>
   <xacro:wheel_gazebo name="rear_left_wheel"/>
   <xacro:wheel_gazebo name="rear_right_wheel"/>
-  <xacro:wheel_gazebo name="mid_left_wheel"/>
-  <xacro:wheel_gazebo name="mid_right_wheel"/>
 
   <!-- ── Skid-steer drive (front + rear driven pairs) ──────────────── -->
   <gazebo>
@@ -547,8 +525,8 @@
       <right_joint>rear_right_wheel_joint</right_joint>
       <wheel_separation>${2.0 * wheel_y_bl}</wheel_separation>
       <wheel_radius>${wheel_r}</wheel_radius>
-      <topic>cmd_vel</topic>
-      <odom_topic>odom</odom_topic>
+      <topic>/cmd_vel</topic>
+      <odom_topic>/odom</odom_topic>
       <tf_topic>/tf</tf_topic>
       <frame_id>odom</frame_id>
       <child_frame_id>base_footprint</child_frame_id>
@@ -560,15 +538,13 @@
   <gazebo>
     <plugin filename="gz-sim-joint-state-publisher-system"
             name="gz::sim::systems::JointStatePublisher">
-      <topic>joint_states</topic>
+      <topic>/joint_states</topic>
       <joint_name>pan_joint</joint_name>
       <joint_name>tilt_joint</joint_name>
       <joint_name>front_left_wheel_joint</joint_name>
       <joint_name>front_right_wheel_joint</joint_name>
       <joint_name>rear_left_wheel_joint</joint_name>
       <joint_name>rear_right_wheel_joint</joint_name>
-      <joint_name>mid_left_wheel_joint</joint_name>
-      <joint_name>mid_right_wheel_joint</joint_name>
     </plugin>
   </gazebo>
 
@@ -576,12 +552,12 @@
   <gazebo reference="lidar_link">
     <sensor name="lidar_sensor" type="gpu_lidar">
       <topic>scan</topic>
-      <update_rate>10</update_rate>
+      <update_rate>15</update_rate>
       <gz_frame_id>lidar_link</gz_frame_id>
       <lidar>
         <scan>
           <horizontal>
-            <samples>360</samples>
+            <samples>180</samples>
             <resolution>1</resolution>
             <min_angle>-3.14159265</min_angle>
             <max_angle> 3.14159265</max_angle>
@@ -589,7 +565,7 @@
         </scan>
         <range>
           <min>0.12</min>
-          <max>12.0</max>
+          <max>8.0</max>
           <resolution>0.01</resolution>
         </range>
         <noise>
@@ -599,7 +575,7 @@
         </noise>
       </lidar>
       <always_on>true</always_on>
-      <visualize>true</visualize>
+      <visualize>false</visualize>
     </sensor>
   </gazebo>
 

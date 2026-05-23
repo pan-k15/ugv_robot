@@ -1,0 +1,12 @@
+[Unit]
+Description=Add multicast route through loopback for gz-transport
+Documentation=https://gazebosim.org/api/transport/12/envvars.html
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/sbin/ip route add 224.0.0.0/4 dev lo
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

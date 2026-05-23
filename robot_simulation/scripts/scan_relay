@@ -6,6 +6,7 @@ leaving header.frame_id empty — which prevents slam_toolbox from processing sc
 """
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import LaserScan
 
 
@@ -13,13 +14,33 @@ class ScanRelay(Node):
     def __init__(self) -> None:
         super().__init__('scan_relay')
         self.declare_parameter('frame_id', 'lidar_link')
+        self.declare_parameter('restamp', False)
         self._frame = self.get_parameter('frame_id').get_parameter_value().string_value
-        self._pub = self.create_publisher(LaserScan, 'scan', 10)
-        self._sub = self.create_subscription(LaserScan, 'scan_raw', self._cb, 10)
+        self._restamp = self.get_parameter('restamp').get_parameter_value().bool_value
+        input_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+        )
+        output_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+        )
+        self._pub = self.create_publisher(LaserScan, 'scan', output_qos)
+        self._sub = self.create_subscription(
+            LaserScan,
+            'scan_raw',
+            self._cb,
+            input_qos,
+        )
 
     def _cb(self, msg: LaserScan) -> None:
-        if not msg.header.frame_id:
-            msg.header.frame_id = self._frame
+        msg.header.frame_id = self._frame
+        if self._restamp:
+            msg.header.stamp = self.get_clock().now().to_msg()
         self._pub.publish(msg)
 
 

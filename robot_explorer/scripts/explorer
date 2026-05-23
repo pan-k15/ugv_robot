@@ -1,0 +1,271 @@
+#!/usr/bin/env python3
+"""
+Autonomous frontier explorer (ROS 2).
+
+Receives frontier centroids from /detected_points, selects the nearest
+unvisited one as the current goal, and drives toward it using a proportional
+heading controller.  LiDAR data provides a real-time obstacle-avoidance
+safety layer that overrides the heading controller when necessary.
+
+State machine
+-------------
+  IDLE       → no frontiers available; rotate slowly to generate scan data
+  ALIGNING   → turning in place to face the goal heading
+  DRIVING    → moving toward the goal (with small heading corrections)
+  AVOIDING   → obstacle too close; turn toward more open side
+  GOAL_DONE  → goal reached; discard and pick next frontier
+
+Topics
+------
+  Sub : /detected_points     geometry_msgs/PointStamped
+  Sub : /scan                sensor_msgs/LaserScan
+  Pub : /cmd_vel             geometry_msgs/Twist
+  Pub : /goal_marker         visualization_msgs/Marker
+"""
+import math
+from collections import deque
+from enum import Enum, auto
+
+import rclpy
+from rclpy.node import Node
+from geometry_msgs.msg import PointStamped, Twist
+from sensor_msgs.msg import LaserScan
+from visualization_msgs.msg import Marker
+import tf2_ros
+from tf2_ros import TransformException
+
+
+# --------------------------------------------------------------------------- #
+
+class State(Enum):
+    IDLE      = auto()
+    ALIGNING  = auto()
+    DRIVING   = auto()
+    AVOIDING  = auto()
+
+
+# --------------------------------------------------------------------------- #
+
+class Explorer(Node):
+
+    def __init__(self):
+        super().__init__('explorer')
+
+        # Parameters
+        self.declare_parameter('forward_speed',    0.20)   # m/s
+        self.declare_parameter('turn_speed',       0.60)   # rad/s
+        self.declare_parameter('goal_tolerance',   0.50)   # m
+        self.declare_parameter('safety_dist',      0.45)   # m
+        self.declare_parameter('align_threshold',  0.20)   # rad
+        self.declare_parameter('front_half_deg',  30.0)
+        self.declare_parameter('dedup_radius',     0.50)   # m – ignore duplicate frontiers
+
+        self._fwd        = self.get_parameter('forward_speed').get_parameter_value().double_value
+        self._turn       = self.get_parameter('turn_speed').get_parameter_value().double_value
+        self._tol        = self.get_parameter('goal_tolerance').get_parameter_value().double_value
+        self._safe       = self.get_parameter('safety_dist').get_parameter_value().double_value
+        self._align_th   = self.get_parameter('align_threshold').get_parameter_value().double_value
+        self._fhalf      = self.get_parameter('front_half_deg').get_parameter_value().double_value * math.pi / 180.0
+        self._dedup_r    = self.get_parameter('dedup_radius').get_parameter_value().double_value
+
+        # TF
+        self._tf_buf = tf2_ros.Buffer()
+        self._tf_lis = tf2_ros.TransformListener(self._tf_buf, self)
+
+        # State
+        self._state        = State.IDLE
+        self._frontiers    = deque(maxlen=50)   # (x, y) in map frame
+        self._visited      = []                 # completed goals
+        self._goal         = None               # current (x, y) goal
+        self._scan         = None
+
+        # Robot pose in map frame (updated via TF each tick)
+        self._rx = 0.0
+        self._ry = 0.0
+        self._ryaw = 0.0
+
+        # Subs / pubs
+        self.create_subscription(PointStamped, '/detected_points',
+                                 self._on_frontier, 50)
+        self.create_subscription(LaserScan, '/scan', self._on_scan, 10)
+
+        self._cmd_pub  = self.create_publisher(Twist,  '/cmd_vel',     10)
+        self._mk_pub   = self.create_publisher(Marker, '/goal_marker', 10)
+
+        self._timer = self.create_timer(0.1, self._tick)   # 10 Hz
+        self.get_logger().info('Explorer ready')
+
+    # ------------------------------------------------------------------ #
+    #  Callbacks
+    # ------------------------------------------------------------------ #
+
+    def _on_frontier(self, msg: PointStamped):
+        pt = (msg.point.x, msg.point.y)
+        # Deduplicate against existing queue
+        for f in self._frontiers:
+            if math.hypot(f[0] - pt[0], f[1] - pt[1]) < self._dedup_r:
+                return
+        # Deduplicate against visited goals
+        for v in self._visited:
+            if math.hypot(v[0] - pt[0], v[1] - pt[1]) < self._dedup_r:
+                return
+        self._frontiers.append(pt)
+
+    def _on_scan(self, msg: LaserScan):
+        self._scan = msg
+
+    # ------------------------------------------------------------------ #
+    #  Helpers
+    # ------------------------------------------------------------------ #
+
+    def _update_pose(self) -> bool:
+        try:
+            t = self._tf_buf.lookup_transform('map', 'base_footprint',
+                                              rclpy.time.Time())
+            self._rx  = t.transform.translation.x
+            self._ry  = t.transform.translation.y
+            q         = t.transform.rotation
+            siny      = 2.0 * (q.w * q.z + q.x * q.y)
+            cosy      = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+            self._ryaw = math.atan2(siny, cosy)
+            return True
+        except TransformException:
+            return False
+
+    def _sector_min(self, lo: float, hi: float) -> float:
+        s = self._scan
+        if s is None:
+            return float('inf')
+        best = float('inf')
+        for i, r in enumerate(s.ranges):
+            a = s.angle_min + i * s.angle_increment
+            if lo <= a <= hi and math.isfinite(r) and s.range_min <= r <= s.range_max:
+                if r < best:
+                    best = r
+        return best
+
+    def _obstacle_ahead(self) -> bool:
+        return self._sector_min(-self._fhalf, self._fhalf) < self._safe
+
+    def _avoidance_turn(self) -> float:
+        """Return turn direction: +1 = left, -1 = right."""
+        d_left  = self._sector_min( self._fhalf,  math.pi / 2.0)
+        d_right = self._sector_min(-math.pi / 2.0, -self._fhalf)
+        return 1.0 if d_left >= d_right else -1.0
+
+    def _select_goal(self):
+        """Pick nearest frontier that is not already visited."""
+        if not self._frontiers:
+            return None
+        best, best_d = None, float('inf')
+        for f in self._frontiers:
+            d = math.hypot(f[0] - self._rx, f[1] - self._ry)
+            if d < best_d:
+                best, best_d = f, d
+        return best
+
+    def _publish_goal_marker(self):
+        if self._goal is None:
+            return
+        mk                    = Marker()
+        mk.header.frame_id    = 'map'
+        mk.header.stamp       = self.get_clock().now().to_msg()
+        mk.ns                 = 'goal'
+        mk.id                 = 0
+        mk.type               = Marker.CYLINDER
+        mk.action             = Marker.ADD
+        mk.pose.position.x    = self._goal[0]
+        mk.pose.position.y    = self._goal[1]
+        mk.pose.orientation.w = 1.0
+        mk.scale.x = mk.scale.y = 0.35
+        mk.scale.z            = 0.6
+        mk.color.g            = 1.0
+        mk.color.a            = 0.85
+        self._mk_pub.publish(mk)
+
+    def _stop(self):
+        self._cmd_pub.publish(Twist())
+
+    # ------------------------------------------------------------------ #
+    #  Main control tick  (10 Hz)
+    # ------------------------------------------------------------------ #
+
+    def _tick(self):
+        if not self._update_pose():
+            return   # TF not ready yet
+
+        cmd = Twist()
+
+        # ── Obstacle avoidance takes priority ─────────────────────────
+        if self._obstacle_ahead():
+            if self._state != State.AVOIDING:
+                self.get_logger().warn('Obstacle! Avoiding…')
+                self._state = State.AVOIDING
+            cmd.angular.z = self._turn * self._avoidance_turn()
+            self._cmd_pub.publish(cmd)
+            return
+
+        # ── Select / refresh goal ─────────────────────────────────────
+        if self._goal is None:
+            self._goal = self._select_goal()
+            if self._goal is None:
+                if self._state != State.IDLE:
+                    self.get_logger().info('No frontiers — idling (slow spin)')
+                    self._state = State.IDLE
+                cmd.angular.z = 0.25   # spin to generate new map data
+                self._cmd_pub.publish(cmd)
+                return
+            self.get_logger().info(
+                f'→ New goal ({self._goal[0]:.2f}, {self._goal[1]:.2f})')
+            self._state = State.ALIGNING
+
+        gx, gy   = self._goal
+        dx, dy   = gx - self._rx, gy - self._ry
+        dist     = math.hypot(dx, dy)
+
+        # ── Goal reached ──────────────────────────────────────────────
+        if dist < self._tol:
+            self.get_logger().info(f'Goal reached ({gx:.2f}, {gy:.2f})')
+            self._visited.append(self._goal)
+            # Drop the reached frontier from the queue
+            self._frontiers = deque(
+                (f for f in self._frontiers
+                 if math.hypot(f[0]-gx, f[1]-gy) > self._dedup_r),
+                maxlen=50)
+            self._goal  = None
+            self._state = State.IDLE
+            self._stop()
+            return
+
+        self._publish_goal_marker()
+
+        # ── Heading error ─────────────────────────────────────────────
+        desired_yaw = math.atan2(dy, dx)
+        err         = math.atan2(math.sin(desired_yaw - self._ryaw),
+                                 math.cos(desired_yaw - self._ryaw))
+
+        # ── ALIGNING state ────────────────────────────────────────────
+        if abs(err) > self._align_th:
+            if self._state != State.ALIGNING:
+                self._state = State.ALIGNING
+            cmd.angular.z = self._turn * (1.0 if err > 0 else -1.0)
+            self._cmd_pub.publish(cmd)
+            return
+
+        # ── DRIVING state ─────────────────────────────────────────────
+        self._state      = State.DRIVING
+        cmd.linear.x     = self._fwd * min(1.0, dist / 1.0)
+        cmd.angular.z    = 0.5 * err   # proportional heading correction
+        self._cmd_pub.publish(cmd)
+
+
+# --------------------------------------------------------------------------- #
+
+def main():
+    rclpy.init()
+    rclpy.spin(Explorer())
+    rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()

@@ -1,5 +1,6 @@
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import (DeclareLaunchArgument, IncludeLaunchDescription,
+                             SetEnvironmentVariable)
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import Command, LaunchConfiguration, PathJoinSubstitution
@@ -24,12 +25,17 @@ def generate_launch_description():
     )
     x_arg   = DeclareLaunchArgument('x',   default_value='0.0',  description='Spawn X (m)')
     y_arg   = DeclareLaunchArgument('y',   default_value='0.0',  description='Spawn Y (m)')
-    z_arg   = DeclareLaunchArgument('z',   default_value='0.15', description='Spawn Z (m)')
+    z_arg   = DeclareLaunchArgument('z',   default_value='0.0',  description='Spawn Z (m)')
     yaw_arg = DeclareLaunchArgument('yaw', default_value='0.0',  description='Spawn yaw (rad)')
     rviz_arg = DeclareLaunchArgument(
         'rviz',
         default_value='true',
         description='Open RViz alongside Gazebo Sim',
+    )
+    rviz_config_arg = DeclareLaunchArgument(
+        'rviz_config',
+        default_value=PathJoinSubstitution([pkg_simulation, 'rviz', 'simulation.rviz']),
+        description='RViz config file to use when rviz:=true',
     )
 
     # ── Gazebo Sim  (-r = start running immediately) ──────────────────
@@ -114,19 +120,40 @@ def generate_launch_description():
         package='robot_simulation',
         executable='scan_relay',
         output='screen',
+        parameters=[{
+            'use_sim_time': True,
+            'restamp': False,
+        }],
+    )
+
+    # ── Image bridges ─────────────────────────────────────────────────
+    # gz camera sensors publish to <topic>/image in gz namespace.
+    # parameter_bridge maps each gz topic to the ROS /image_raw name.
+    # gz camera sensors publish images to the bare <topic> name (no /image suffix).
+    # camera_info and points DO use suffixes and are handled in the main bridge.
+    rgb_image_bridge = Node(
+        package='ros_gz_bridge',
+        executable='parameter_bridge',
+        name='rgb_image_bridge',
+        output='screen',
+        arguments=[
+            '/camera@sensor_msgs/msg/Image[gz.msgs.Image',
+            '/front_camera@sensor_msgs/msg/Image[gz.msgs.Image',
+        ],
+        remappings=[
+            ('/camera',       '/camera/image_raw'),
+            ('/front_camera', '/front_camera/image_raw'),
+        ],
         parameters=[{'use_sim_time': True}],
     )
 
-    # ── Image bridge (uses transport, separate from parameter_bridge) ──
-    image_bridge = Node(
-        package='ros_gz_image',
-        executable='image_bridge',
+    depth_image_bridge = Node(
+        package='ros_gz_bridge',
+        executable='parameter_bridge',
+        name='depth_image_bridge',
         output='screen',
-        arguments=[
-            '/camera/image_raw',
-            '/depth_camera/image_raw',
-            '/front_camera/image_raw',
-        ],
+        arguments=['/depth_camera@sensor_msgs/msg/Image[gz.msgs.Image'],
+        remappings=[('/depth_camera', '/depth_camera/image_raw')],
         parameters=[{'use_sim_time': True}],
     )
 
@@ -135,20 +162,27 @@ def generate_launch_description():
         package='rviz2',
         executable='rviz2',
         output='screen',
+        arguments=['-d', LaunchConfiguration('rviz_config')],
         parameters=[{'use_sim_time': True}],
         condition=IfCondition(LaunchConfiguration('rviz')),
     )
 
     return LaunchDescription([
+        # gz-transport uses multicast for peer discovery.
+        # GZ_IP=127.0.0.1 binds all gz nodes to the loopback interface so
+        # the simulation works without an active LAN/WiFi link.
+        SetEnvironmentVariable('GZ_IP', '127.0.0.1'),
         world_arg,
         x_arg, y_arg, z_arg, yaw_arg,
         rviz_arg,
+        rviz_config_arg,
         gz_sim,
         robot_state_publisher,
         spawn_robot,
         bridge,
         scan_bridge,
         scan_relay,
-        image_bridge,
+        rgb_image_bridge,
+        depth_image_bridge,
         rviz,
     ])
