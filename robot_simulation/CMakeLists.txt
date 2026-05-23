@@ -28,7 +28,9 @@ install(
   DESTINATION share/${PROJECT_NAME}
 )
 
-install(PROGRAMS scripts/scan_relay
+install(PROGRAMS
+  scripts/scan_relay
+  scripts/cmd_vel_relay
   DESTINATION lib/${PROJECT_NAME}
 )
 
