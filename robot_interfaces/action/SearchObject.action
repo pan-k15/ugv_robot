@@ -1,0 +1,12 @@
+string target_class
+float32 min_confidence
+---
+bool found
+float64 x
+float64 y
+float64 z
+string image_path
+---
+string search_state
+float32 progress_percent
+int32 detections_count

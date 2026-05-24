@@ -9,6 +9,7 @@ find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(vision_msgs REQUIRED)
 find_package(visualization_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
@@ -23,7 +24,13 @@ ament_target_dependencies(patrol
   rclcpp sensor_msgs geometry_msgs visualization_msgs
   tf2_ros tf2_geometry_msgs)
 
-install(TARGETS explore patrol
+# ── inspection ────────────────────────────────────────────────────────
+add_executable(inspection src/inspection.cpp)
+ament_target_dependencies(inspection
+  rclcpp sensor_msgs geometry_msgs vision_msgs visualization_msgs
+  tf2_ros tf2_geometry_msgs)
+
+install(TARGETS explore patrol inspection
   DESTINATION lib/${PROJECT_NAME}
 )
 

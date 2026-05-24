@@ -1,0 +1,198 @@
+#!/usr/bin/env python3
+import threading
+from typing import Optional
+
+import numpy as np
+import rclpy
+import rclpy.duration
+import rclpy.time
+import tf2_geometry_msgs  # noqa: F401 — registers geometry_msgs transforms
+import tf2_ros
+from cv_bridge import CvBridge
+from geometry_msgs.msg import PointStamped, PoseStamped
+from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
+from rclpy.node import Node
+from sensor_msgs.msg import CameraInfo, Image
+from vision_msgs.msg import Detection2DArray
+
+from robot_interfaces.srv import DetectObject
+
+DETECTION_TTL = 2.0   # seconds — reject detections older than this
+DEPTH_RADIUS   = 5    # pixels — search radius around bbox centre for valid depth
+
+
+class DetectObjectServer(Node):
+    def __init__(self):
+        super().__init__('detect_object_server')
+        cb = ReentrantCallbackGroup()
+
+        self._bridge   = CvBridge()
+        self._lock     = threading.Lock()
+        self._detections: Optional[Detection2DArray] = None
+        self._depth_img: Optional[np.ndarray]        = None
+        self._cam_info: Optional[CameraInfo]         = None
+
+        self._tf_buffer   = tf2_ros.Buffer()
+        self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
+
+        self.create_subscription(
+            Detection2DArray, '/vision/detections',
+            self._on_detections, 10, callback_group=cb)
+        self.create_subscription(
+            Image, '/depth_camera/image_raw',
+            self._on_depth, 10, callback_group=cb)
+        self.create_subscription(
+            CameraInfo, '/depth_camera/camera_info',
+            self._on_cam_info, 1, callback_group=cb)
+
+        self.create_service(
+            DetectObject, 'detect_object', self._handle, callback_group=cb)
+
+        self.get_logger().info('detect_object service ready on /detect_object')
+
+    # ── subscribers ──────────────────────────────────────────────────────────
+
+    def _on_detections(self, msg: Detection2DArray):
+        with self._lock:
+            self._detections = msg
+
+    def _on_depth(self, msg: Image):
+        with self._lock:
+            self._depth_img = self._bridge.imgmsg_to_cv2(msg, desired_encoding='32FC1')
+
+    def _on_cam_info(self, msg: CameraInfo):
+        with self._lock:
+            self._cam_info = msg
+
+    # ── service handler ───────────────────────────────────────────────────────
+
+    def _handle(self, request, response):
+        target = request.target_class.strip().lower()
+
+        with self._lock:
+            detections = self._detections
+            depth_img  = self._depth_img
+            cam_info   = self._cam_info
+
+        empty_pose = PoseStamped()
+        empty_pose.header.frame_id = 'map'
+        empty_pose.pose.orientation.w = 1.0
+
+        if detections is None:
+            response.found      = False
+            response.confidence = 0.0
+            response.pose       = empty_pose
+            return response
+
+        # Reject stale detection messages
+        stamp = rclpy.time.Time.from_msg(detections.header.stamp)
+        age   = (self.get_clock().now() - stamp).nanoseconds * 1e-9
+        if age > DETECTION_TTL:
+            response.found      = False
+            response.confidence = 0.0
+            response.pose       = empty_pose
+            return response
+
+        # Find highest-confidence match for target class
+        best_det  = None
+        best_conf = 0.0
+        for det in detections.detections:
+            for hyp in det.results:
+                if (hyp.hypothesis.class_id.strip().lower() == target
+                        and hyp.hypothesis.score > best_conf):
+                    best_det  = det
+                    best_conf = hyp.hypothesis.score
+
+        if best_det is None:
+            response.found      = False
+            response.confidence = 0.0
+            response.pose       = empty_pose
+            return response
+
+        response.found      = True
+        response.confidence = float(best_conf)
+        response.pose       = self._project_to_map(best_det, depth_img, cam_info)
+        return response
+
+    # ── helpers ───────────────────────────────────────────────────────────────
+
+    def _project_to_map(self, det, depth_img, cam_info) -> PoseStamped:
+        fallback = PoseStamped()
+        fallback.header.frame_id = 'map'
+        fallback.header.stamp    = self.get_clock().now().to_msg()
+        fallback.pose.orientation.w = 1.0
+
+        if depth_img is None or cam_info is None:
+            return fallback
+
+        u = int(det.bbox.center.position.x)
+        v = int(det.bbox.center.position.y)
+        h, w = depth_img.shape
+
+        # Search outward from bbox centre for a finite, positive depth value
+        depth = float('nan')
+        for r in range(DEPTH_RADIUS + 1):
+            for du in range(-r, r + 1):
+                for dv in range(-r, r + 1):
+                    nu, nv = u + du, v + dv
+                    if 0 <= nu < w and 0 <= nv < h:
+                        d = float(depth_img[nv, nu])
+                        if np.isfinite(d) and d > 0.0:
+                            depth = d
+                            break
+                if np.isfinite(depth):
+                    break
+            if np.isfinite(depth):
+                break
+
+        if not np.isfinite(depth):
+            return fallback
+
+        fx = cam_info.k[0]
+        fy = cam_info.k[4]
+        cx = cam_info.k[2]
+        cy = cam_info.k[5]
+
+        pt = PointStamped()
+        pt.header.frame_id = 'depth_optical_frame'
+        pt.header.stamp    = self.get_clock().now().to_msg()
+        pt.point.x = (u - cx) * depth / fx
+        pt.point.y = (v - cy) * depth / fy
+        pt.point.z = depth
+
+        # Try map first, fall back to odom
+        for target_frame in ('map', 'odom'):
+            try:
+                if self._tf_buffer.can_transform(
+                        target_frame, pt.header.frame_id, pt.header.stamp,
+                        timeout=rclpy.duration.Duration(seconds=1.0)):
+                    pt_out = self._tf_buffer.transform(pt, target_frame)
+                    pose = PoseStamped()
+                    pose.header.frame_id = target_frame
+                    pose.header.stamp    = pt.header.stamp
+                    pose.pose.position.x = pt_out.point.x
+                    pose.pose.position.y = pt_out.point.y
+                    pose.pose.position.z = pt_out.point.z
+                    pose.pose.orientation.w = 1.0
+                    return pose
+            except Exception as exc:
+                self.get_logger().warn(f'TF {target_frame} failed: {exc}')
+
+        return fallback
+
+
+def main():
+    rclpy.init()
+    node = DetectObjectServer()
+    executor = MultiThreadedExecutor()
+    executor.add_node(node)
+    try:
+        executor.spin()
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()

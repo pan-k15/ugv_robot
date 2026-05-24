@@ -1,6 +1,6 @@
 # UGV Rover PT — ROS 2 Workspace
 
-A complete ROS 2 autonomy stack — from URDF model and Gazebo Harmonic simulation through online SLAM, autonomous frontier exploration, Nav2 point-to-point navigation, reactive obstacle avoidance, and YOLOv8 object detection.
+A complete ROS 2 autonomy stack — from URDF model and Gazebo Harmonic simulation through online SLAM, autonomous frontier exploration, Nav2 point-to-point navigation, reactive obstacle avoidance, YOLOv8 object detection, waypoint inspection, and service-layer abstractions.
 
 ---
 
@@ -12,11 +12,12 @@ A complete ROS 2 autonomy stack — from URDF model and Gazebo Harmonic simulati
 | `robot_simulation` | Gazebo Harmonic simulation, GZ↔ROS bridges, empty and obstacle worlds |
 | `robot_slam` | Online mapping with slam_toolbox (async, lifecycle-managed) |
 | `robot_explorer` | Autonomous RRT frontier exploration + heading-controller navigator |
-| `robot_tasks` | Reactive obstacle-avoidance explorer (`explore`) + waypoint patrol (`patrol`) |
+| `robot_tasks` | Reactive explorer (`explore`), waypoint patrol (`patrol`), inspection tour (`inspection`) |
 | `robot_vision` | YOLOv8 object detection on any camera topic |
 | `robot_navigation` | Nav2 stack — MPPI controller, NavFn planner, AMCL or SLAM localization, optional EKF |
-| `robot_interfaces` | Custom message / service / action definitions (scaffold) |
-| `robot_services` | Custom ROS 2 service nodes (planned) |
+| `robot_interfaces` | Custom service and action definitions (`GoToPose`, `DetectObject`, `NavigateToPose`, `SearchObject`) |
+| `robot_services` | Service servers: `/go_to_pose` (Nav2 wrapper) and `/detect_object` (YOLO + depth) |
+| `robot_actions` | Action servers: `/robot_navigate_to_pose` (Nav2 wrapper with feedback) and `/search_object` (360° YOLO scan) |
 
 ---
 
@@ -453,6 +454,181 @@ ros2 launch robot_vision vision.launch.py \
 
 ---
 
+### 9 — Inspection tour
+
+Drives the robot to each waypoint, performs a 360° rotation scan to detect objects with YOLO, then prints a summary of all unique sightings. Uses LiDAR for obstacle avoidance between waypoints.
+
+```bash
+# Terminal 1 — simulation + YOLO
+ros2 launch robot_simulation obstacle_sim.launch.py
+ros2 launch robot_vision vision.launch.py
+
+# Terminal 2 — inspection
+ros2 launch robot_tasks inspection.launch.py
+```
+
+```bash
+# Custom waypoints (e.g. southern half of obstacle arena)
+ros2 launch robot_tasks inspection.launch.py \
+  waypoints_x:="[0.0, 3.0, 0.0, -3.0]" \
+  waypoints_y:="[0.0, -2.5, -4.0, -2.5]"
+```
+
+**State machine:**
+
+| State | Behaviour |
+|---|---|
+| `ALIGNING` | Rotates in place toward the next waypoint |
+| `DRIVING` | Drives forward with proportional speed and soft heading correction |
+| `AVOIDING` | Obstacle within `safety_dist` — turns toward the more open side |
+| `SCANNING` | Rotates in place for `scan_duration` seconds (~one full revolution) |
+| `DONE` | All waypoints visited; final sighting summary printed to the log |
+
+**Detection during scan:**  
+Each YOLO bounding box is projected into the world frame by taking the horizontal offset of the bbox centre relative to the camera FOV, looking up the nearest LiDAR range in that direction, and computing `(rx + range·cos(ryaw + bearing), ry + range·sin(ryaw + bearing))`. Sightings of the same class within `merge_dist` are merged into a running average.
+
+| Argument | Default | Description |
+|---|---|---|
+| `waypoints_x` / `waypoints_y` | 2×2 m square | Inspection waypoints (m, odom frame) |
+| `forward_speed` | `0.2` | Drive speed (m/s) |
+| `turn_speed` | `0.6` | Turn rate while navigating (rad/s) |
+| `scan_turn_speed` | `0.8` | Turn rate during 360° scan (rad/s) |
+| `goal_tolerance` | `0.3` | Arrival radius (m) |
+| `safety_dist` | `0.45` | Obstacle abort distance (m) |
+| `scan_duration` | `8.0` | Seconds to spin at each waypoint (~360° at 0.8 rad/s) |
+| `camera_fov_deg` | `90.0` | Horizontal FOV of front camera (degrees) |
+| `img_width` | `640.0` | Detection image width (pixels) |
+| `merge_dist` | `0.5` | Radius to merge duplicate sightings (m) |
+| `loop` | `false` | Repeat the inspection tour indefinitely |
+
+**RViz markers** published to `/inspection/markers`:
+
+| Marker | Colour | Meaning |
+|---|---|---|
+| Waypoint cylinder | Blue | Pending |
+| Waypoint cylinder | Yellow | Robot heading here |
+| Waypoint cylinder | Orange | Currently scanning |
+| Sphere + label | Red | Detected object (world position estimate) |
+
+---
+
+### 10 — Service servers
+
+Thin service wrappers that other nodes and scripts can call programmatically.
+
+```bash
+ros2 launch robot_services service_server.launch.py
+```
+
+| Argument | Default | Description |
+|---|---|---|
+| `use_sim_time` | `true` | Use Gazebo `/clock` |
+
+**`/go_to_pose`** — `robot_interfaces/srv/GoToPose`  
+Sends a goal to Nav2's `navigate_to_pose` action and blocks until it succeeds or fails.  
+Requires Nav2 to be running.
+
+```bash
+ros2 service call /go_to_pose robot_interfaces/srv/GoToPose \
+  "{x: 2.0, y: 1.5, yaw: 1.57}"
+```
+
+```
+Request:   float64 x, float64 y, float64 yaw
+Response:  bool success, string message
+```
+
+**`/detect_object`** — `robot_interfaces/srv/DetectObject`  
+Returns the highest-confidence YOLO detection of a named class, with its 3-D pose estimated from the depth camera and projected to the map frame.  
+Requires `robot_vision` YOLO node and a depth camera bridge.
+
+```bash
+ros2 service call /detect_object robot_interfaces/srv/DetectObject \
+  "{target_class: 'person'}"
+```
+
+```
+Request:   string target_class
+Response:  bool found, geometry_msgs/PoseStamped pose, float32 confidence
+```
+
+---
+
+### 11 — Action servers
+
+Long-running action wrappers that publish incremental feedback while executing.
+
+```bash
+ros2 launch robot_actions action_server.launch.py
+```
+
+| Argument | Default | Description |
+|---|---|---|
+| `use_sim_time` | `true` | Use `/clock` from simulation instead of wall time |
+
+**`/robot_navigate_to_pose`** — `robot_interfaces/action/NavigateToPose`  
+Forwards a goal to Nav2's `navigate_to_pose` action and streams `distance_remaining` + `current_state` feedback every 500 ms. Supports cancellation. Requires Nav2 to be running.
+
+```
+Goal:     float64 x, float64 y, float64 yaw
+Feedback: float32 distance_remaining, string current_state
+            current_state: "Following path" | "Arriving" | "Recovering (N)"
+Result:   bool success, string message
+```
+
+```bash
+ros2 action send_goal /robot_navigate_to_pose \
+  robot_interfaces/action/NavigateToPose \
+  "{x: 2.0, y: 1.5, yaw: 1.57}" --feedback
+```
+
+---
+
+**`/search_object`** — `robot_interfaces/action/SearchObject`  
+Rotates the robot 360° at 0.3 rad/s while polling YOLO detections. Stops as soon as the target class is found above the confidence threshold, computes its 3-D world position from the depth camera, saves a JPEG snapshot to `/tmp/`, and succeeds. Aborts if the full rotation completes without a match. Requires `robot_vision` (`vision.launch.py`) to be running.
+
+```
+Goal:     string target_class, float32 min_confidence
+Feedback: string search_state, float32 progress_percent, int32 detections_count
+            search_state: "Scanning" | "Detected (N)" | "Found" | "Not found"
+Result:   bool found, float64 x, float64 y, float64 z, string image_path
+```
+
+```bash
+ros2 action send_goal /search_object \
+  robot_interfaces/action/SearchObject \
+  "{target_class: 'person', min_confidence: 0.5}" --feedback
+```
+
+Topics subscribed during execution:
+
+| Topic | Use |
+|---|---|
+| `/vision/detections` | YOLO bounding boxes (class + confidence) |
+| `/camera/image_raw` | RGB frame saved on detection |
+| `/depth_camera/image_raw` | Depth (32FC1) for 3-D position |
+| `/depth_camera/camera_info` | Intrinsics for back-projection |
+
+---
+
+## Custom Interfaces (`robot_interfaces`)
+
+### Services
+
+| Service | File | Description |
+|---|---|---|
+| `GoToPose` | `srv/GoToPose.srv` | Navigate to (x, y, yaw) via Nav2 |
+| `DetectObject` | `srv/DetectObject.srv` | Find a named YOLO class; return 3-D pose |
+
+### Actions
+
+| Action | File | Description |
+|---|---|---|
+| `NavigateToPose` | `action/NavigateToPose.action` | Navigate to (x, y, yaw) via Nav2 with distance feedback |
+| `SearchObject` | `action/SearchObject.action` | 360° YOLO scan; returns 3-D pose + image path on match |
+
+---
+
 ## Full Topic Reference
 
 ### Simulation / Hardware
@@ -502,7 +678,7 @@ ros2 launch robot_vision vision.launch.py \
 | `/global_costmap/costmap_raw` | `nav2_msgs/Costmap` | global_costmap |
 | `/waypoints` | `nav_msgs/Path` | waypoint_follower input |
 
-### Navigation Actions
+### Navigation Actions (Nav2)
 
 | Action | Type | Server |
 |---|---|---|
@@ -511,6 +687,13 @@ ros2 launch robot_vision vision.launch.py \
 | `/follow_waypoints` | `nav2_msgs/FollowWaypoints` | waypoint_follower |
 | `/compute_path_to_pose` | `nav2_msgs/ComputePathToPose` | planner_server |
 | `/follow_path` | `nav2_msgs/FollowPath` | controller_server |
+
+### Robot Actions
+
+| Action | Type | Server |
+|---|---|---|
+| `/robot_navigate_to_pose` | `robot_interfaces/action/NavigateToPose` | navigate_to_pose_action_server |
+| `/search_object` | `robot_interfaces/action/SearchObject` | search_object_action_server |
 
 ### Autonomous Exploration
 
@@ -526,6 +709,7 @@ ros2 launch robot_vision vision.launch.py \
 | Topic | Type | Source |
 |---|---|---|
 | `/patrol_markers` | `visualization_msgs/MarkerArray` | patrol node |
+| `/inspection/markers` | `visualization_msgs/MarkerArray` | inspection node |
 
 ### Vision
 
@@ -533,6 +717,13 @@ ros2 launch robot_vision vision.launch.py \
 |---|---|---|
 | `/vision/detections` | `vision_msgs/Detection2DArray` | yolo_node |
 | `/vision/image_detected` | `sensor_msgs/Image` | yolo_node |
+
+### Services
+
+| Service | Type | Server |
+|---|---|---|
+| `/go_to_pose` | `robot_interfaces/srv/GoToPose` | go_to_pose_server |
+| `/detect_object` | `robot_interfaces/srv/DetectObject` | detect_object_server |
 
 ---
 

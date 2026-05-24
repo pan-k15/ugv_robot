@@ -1,0 +1,5 @@
+string target_class
+---
+bool found
+geometry_msgs/PoseStamped pose
+float32 confidence
