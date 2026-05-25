@@ -23,6 +23,7 @@ def generate_launch_description():
             executable='controller_server',
             output='screen',
             parameters=[nav2_params, {'use_sim_time': use_sim_time}],
+            remappings=[('cmd_vel', 'cmd_vel_nav')],
         ),
         Node(
             package='nav2_smoother',
@@ -64,6 +65,10 @@ def generate_launch_description():
             name='velocity_smoother',
             output='screen',
             parameters=[nav2_params, {'use_sim_time': use_sim_time}],
+            remappings=[
+                ('cmd_vel',         'cmd_vel_nav'),  # receive from controller_server
+                ('cmd_vel_smoothed', 'cmd_vel'),     # publish to robot / Gazebo bridge
+            ],
         ),
         Node(
             package='nav2_lifecycle_manager',

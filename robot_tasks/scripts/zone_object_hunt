@@ -1,0 +1,203 @@
+#!/usr/bin/env python3
+"""
+zone_object_hunt — navigate to each zone and search for a target object.
+
+For every zone (in order):
+  1. /robot_navigate_to_pose  (NavigateToPose action) — drive to the zone.
+  2. /search_object           (SearchObject action)   — rotate 360° with YOLO.
+
+Stops the moment the object is found and reports the zone index plus the
+object's 3D position in the map frame.  If every zone is exhausted without
+a detection the task exits with a warning.
+
+Parameters
+----------
+target_class    str     YOLO class label to search for   (default: 'person')
+min_confidence  float   Minimum detection score [0–1]    (default: 0.5)
+zones_x         float[] X coordinates of zones in map frame
+zones_y         float[] Y coordinates of zones in map frame
+zones_yaw       float[] Arrival heading (rad) per zone   (default: 0.0 each)
+
+Usage
+-----
+  ros2 run robot_tasks zone_object_hunt \\
+      --ros-args \\
+      -p target_class:=bottle \\
+      -p min_confidence:=0.6 \\
+      -p zones_x:="[1.0, 3.0, 5.0]" \\
+      -p zones_y:="[0.0, 2.0, 0.0]"
+
+Prerequisites
+-------------
+  robot_actions  action_server.launch.py   (/robot_navigate_to_pose, /search_object)
+  robot_vision   vision.launch.py          (YOLO detections)
+  Nav2 + SLAM / localization
+"""
+import threading
+
+import rclpy
+from rclpy.action import ActionClient
+from rclpy.executors import MultiThreadedExecutor
+from rclpy.node import Node
+
+from robot_interfaces.action import NavigateToPose, SearchObject
+
+
+class ZoneObjectHuntNode(Node):
+    def __init__(self):
+        super().__init__('zone_object_hunt')
+        self.declare_parameter('target_class',   'person')
+        self.declare_parameter('min_confidence', 0.5)
+        self.declare_parameter('zones_x',   [0.0])
+        self.declare_parameter('zones_y',   [0.0])
+        self.declare_parameter('zones_yaw', [0.0])
+
+        self._nav_client    = ActionClient(self, NavigateToPose, 'robot_navigate_to_pose')
+        self._search_client = ActionClient(self, SearchObject,   'search_object')
+
+    # ── main task ─────────────────────────────────────────────────────────────
+
+    def run(self):
+        target   = self.get_parameter('target_class').value
+        min_conf = float(self.get_parameter('min_confidence').value)
+        xs       = list(self.get_parameter('zones_x').value)
+        ys       = list(self.get_parameter('zones_y').value)
+        yaws     = list(self.get_parameter('zones_yaw').value)
+
+        if not xs or len(xs) != len(ys):
+            self.get_logger().error(
+                "zones_x and zones_y must be non-empty and the same length.")
+            return
+
+        n = len(xs)
+        self.get_logger().info(
+            f"ZoneObjectHunt: target='{target}'  min_conf={min_conf:.2f}  zones={n}"
+        )
+        self.get_logger().info(
+            "Waiting for action servers…"
+        )
+        self._nav_client.wait_for_server()
+        self._search_client.wait_for_server()
+
+        for i, (x, y) in enumerate(zip(xs, ys)):
+            yaw = yaws[i] if i < len(yaws) else 0.0
+
+            self.get_logger().info(
+                f"── Zone {i + 1}/{n}  ({x:.2f}, {y:.2f}, yaw={yaw:.2f}) ──────────"
+            )
+
+            # ── 1. Navigate to zone ───────────────────────────────────────────
+            nav_goal     = NavigateToPose.Goal()
+            nav_goal.x   = x
+            nav_goal.y   = y
+            nav_goal.yaw = yaw
+
+            nav_res = self._act(
+                self._nav_client,
+                nav_goal,
+                self._nav_feedback_cb,
+            )
+
+            if nav_res is None or not nav_res.result.success:
+                msg = nav_res.result.message if nav_res else "no response"
+                self.get_logger().warn(
+                    f"  Navigation to zone {i + 1} failed: {msg} — skipping zone"
+                )
+                continue
+
+            self.get_logger().info(f"  Arrived at zone {i + 1}.")
+
+            # ── 2. Search for the object ──────────────────────────────────────
+            srch_goal                = SearchObject.Goal()
+            srch_goal.target_class   = target
+            srch_goal.min_confidence = min_conf
+
+            srch_res = self._act(
+                self._search_client,
+                srch_goal,
+                self._search_feedback_cb,
+            )
+
+            if srch_res is not None and srch_res.result.found:
+                r = srch_res.result
+                self._report_found(target, i + 1, n, x, y, r)
+                return
+
+            self.get_logger().info(
+                f"  '{target}' not found at zone {i + 1} — continuing."
+            )
+
+        self.get_logger().warn(
+            f"All {n} zones exhausted — '{target}' not found."
+        )
+
+    # ── feedback callbacks ────────────────────────────────────────────────────
+
+    def _nav_feedback_cb(self, fb_msg):
+        fb = fb_msg.feedback
+        self.get_logger().info(
+            f"  [nav]    {fb.current_state:<18}  dist={fb.distance_remaining:.2f} m"
+        )
+
+    def _search_feedback_cb(self, fb_msg):
+        fb = fb_msg.feedback
+        self.get_logger().info(
+            f"  [search] {fb.search_state:<18}  "
+            f"{fb.progress_percent:5.1f}%  dets={fb.detections_count}"
+        )
+
+    # ── discovery report ──────────────────────────────────────────────────────
+
+    def _report_found(self, target, zone_num, total_zones, zx, zy, result):
+        sep = "═" * 50
+        self.get_logger().info(f"\n╔{sep}╗")
+        self.get_logger().info(
+            f"║  FOUND '{target}'  "
+            f"(zone {zone_num}/{total_zones})"
+        )
+        self.get_logger().info(f"║  Zone pos :  ({zx:.3f}, {zy:.3f})")
+        self.get_logger().info(
+            f"║  Object   :  ({result.x:.3f}, {result.y:.3f}, {result.z:.3f})  [map]"
+        )
+        if result.image_path:
+            self.get_logger().info(f"║  Image    :  {result.image_path}")
+        self.get_logger().info(f"╚{sep}╝")
+
+    # ── generic action helper ─────────────────────────────────────────────────
+
+    def _act(self, client, goal, feedback_cb=None):
+        """Send goal, block until result, return GetResult_Response or None."""
+        ev, result = threading.Event(), [None]
+
+        def on_result(future):
+            result[0] = future.result()
+            ev.set()
+
+        def on_goal(future):
+            handle = future.result()
+            if not handle.accepted:
+                self.get_logger().warn("Goal was rejected.")
+                ev.set()
+                return
+            handle.get_result_async().add_done_callback(on_result)
+
+        client.send_goal_async(goal, feedback_callback=feedback_cb) \
+              .add_done_callback(on_goal)
+        ev.wait()
+        return result[0]
+
+
+def main():
+    rclpy.init()
+    node = ZoneObjectHuntNode()
+    executor = MultiThreadedExecutor()
+    executor.add_node(node)
+    spin = threading.Thread(target=executor.spin, daemon=True)
+    spin.start()
+    try:
+        node.run()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        rclpy.shutdown()
+        spin.join(timeout=2.0)

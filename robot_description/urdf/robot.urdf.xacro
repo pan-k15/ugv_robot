@@ -513,7 +513,8 @@
   <xacro:macro name="wheel_gazebo" params="name">
     <gazebo reference="${name}">
       <mu1>1.0</mu1>
-      <mu2>0.2</mu2>
+      <mu2>0.3</mu2>
+      <fdir1>1 0 0</fdir1>
       <kp>200000.0</kp>
       <kd>80.0</kd>
       <minDepth>0.002</minDepth>
@@ -536,6 +537,7 @@
       <right_joint>rear_right_wheel_joint</right_joint>
       <wheel_separation>${drive_wheel_separation}</wheel_separation>
       <wheel_radius>${wheel_r}</wheel_radius>
+      <max_wheel_torque>10.0</max_wheel_torque>
       <topic>/cmd_vel</topic>
       <odom_topic>/odom</odom_topic>
       <!-- EKF (robot_localization) owns odom→base_footprint TF; redirect gz TF so it does not conflict -->

@@ -1,0 +1,144 @@
+#!/usr/bin/env python3
+"""
+object_approach — search for a target object then drive to it.
+
+Pipeline:
+  1. /search_object  (SearchObject action) — rotate 360° until YOLO detects
+                                              the target class; returns map (x,y,z)
+  2. /go_to_pose     (GoToPose service)    — navigate to the reported position
+
+Parameters
+----------
+target_class    : str   class label to search for   (default: 'person')
+min_confidence  : float minimum YOLO score           (default: 0.5)
+
+Usage
+-----
+  ros2 run robot_tasks object_approach \
+      --ros-args -p target_class:=bottle -p min_confidence:=0.6
+
+Prerequisites
+-------------
+  robot_actions  action_server.launch.py   (/search_object)
+  robot_services service_server.launch.py  (/go_to_pose)
+  robot_vision   vision.launch.py          (YOLO detections)
+  Nav2 + SLAM / localization
+"""
+import threading
+
+import rclpy
+from rclpy.action import ActionClient
+from rclpy.executors import MultiThreadedExecutor
+from rclpy.node import Node
+
+from robot_interfaces.action import SearchObject
+from robot_interfaces.srv import GoToPose
+
+
+class ObjectApproachNode(Node):
+    def __init__(self):
+        super().__init__('object_approach')
+        self.declare_parameter('target_class', 'person')
+        self.declare_parameter('min_confidence', 0.5)
+
+        self._search_client = ActionClient(self, SearchObject, 'search_object')
+        self._nav_client = self.create_client(GoToPose, 'go_to_pose')
+
+    # ── main task ─────────────────────────────────────────────────────────────
+
+    def run(self):
+        target = self.get_parameter('target_class').value
+        min_conf = self.get_parameter('min_confidence').value
+
+        self.get_logger().info(
+            f"ObjectApproach: searching for '{target}' (min_conf={min_conf:.2f})"
+        )
+
+        self._search_client.wait_for_server()
+        while not self._nav_client.wait_for_service(timeout_sec=1.0):
+            self.get_logger().info('Waiting for /go_to_pose…')
+
+        # ── Step 1: search ────────────────────────────────────────────────────
+        goal = SearchObject.Goal()
+        goal.target_class = target
+        goal.min_confidence = float(min_conf)
+
+        search_res = self._act(self._search_client, goal)
+
+        if search_res is None or not search_res.result.found:
+            self.get_logger().warn(f"'{target}' not found after full scan — aborting.")
+            return
+
+        obj_x = search_res.result.x
+        obj_y = search_res.result.y
+        img   = search_res.result.image_path
+        self.get_logger().info(
+            f"Found '{target}' at map ({obj_x:.2f}, {obj_y:.2f})"
+            + (f"  image: {img}" if img else "")
+        )
+
+        # ── Step 2: navigate to the object ────────────────────────────────────
+        self.get_logger().info(f"Navigating to ({obj_x:.2f}, {obj_y:.2f})…")
+        req = GoToPose.Request()
+        req.x   = obj_x
+        req.y   = obj_y
+        req.yaw = 0.0       # heading doesn't matter for an approach
+
+        nav_res = self._svc(self._nav_client, req)
+        if nav_res and nav_res.success:
+            self.get_logger().info("Arrived at object location.")
+        else:
+            msg = nav_res.message if nav_res else "no response"
+            self.get_logger().warn(f"Navigation failed: {msg}")
+
+    # ── helpers ───────────────────────────────────────────────────────────────
+
+    def _svc(self, client, req):
+        ev, result = threading.Event(), [None]
+        def cb(future):
+            result[0] = future.result(); ev.set()
+        client.call_async(req).add_done_callback(cb)
+        ev.wait()
+        return result[0]
+
+    def _act(self, client, goal):
+        ev, result = threading.Event(), [None]
+
+        def on_feedback(fb_msg):
+            fb = fb_msg.feedback
+            self.get_logger().info(
+                f"[search] {fb.search_state}  {fb.progress_percent:.0f}%  "
+                f"detections={fb.detections_count}"
+            )
+
+        def on_result(future):
+            result[0] = future.result(); ev.set()
+
+        def on_goal(future):
+            handle = future.result()
+            if not handle.accepted:
+                self.get_logger().warn("Search goal rejected.")
+                ev.set()
+                return
+            handle.get_result_async().add_done_callback(on_result)
+
+        client.send_goal_async(goal, feedback_callback=on_feedback) \
+              .add_done_callback(on_goal)
+        ev.wait()
+        return result[0]
+
+
+def main():
+    rclpy.init()
+    node = ObjectApproachNode()
+    executor = MultiThreadedExecutor()
+    executor.add_node(node)
+    spin = threading.Thread(target=executor.spin, daemon=True)
+    spin.start()
+    try:
+        node.run()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        rclpy.shutdown()
+        spin.join(timeout=2.0)
