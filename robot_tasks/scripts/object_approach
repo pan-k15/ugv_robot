@@ -142,3 +142,7 @@ def main():
     finally:
         rclpy.shutdown()
         spin.join(timeout=2.0)
+
+
+if __name__ == '__main__':
+    main()
